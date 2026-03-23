@@ -4,8 +4,8 @@
   "window_width": 1200,
   "window_height": 850,
   "simulation_mode": false,
-  "log_dir": "logs",
-  "current_batch": "20260224184355.csv",
+  "log_dir": "D:\\logs",
+  "current_batch": "20260305144532.csv",
   "bluetooth": {
     "enabled": true,
     "device_addresses": [
@@ -20,7 +20,7 @@
     "timeout": 10.0
   },
   "plc": {
-    "enabled": true,
+    "enabled": false,
     "ip_address": "127.0.0.1",
     "port": 5000
   },
@@ -33,15 +33,17 @@
   "measurement": {
     "tolerance_upper": 0.3,
     "tolerance_lower": 0.5,
+    "empty_upper": 40.0,
+    "empty_lower": 20.0,
     "meter_count": 12,
     "channel_enabled": [
-      true,
       false,
       false,
       false,
       false,
       false,
-      true,
+      false,
+      false,
       false,
       false,
       false,

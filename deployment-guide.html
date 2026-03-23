@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>三橋耳溫槍檢測系統 - 部署指南</title>
+<style>
+  :root {
+    --primary: #2563eb;
+    --primary-light: #dbeafe;
+    --success: #16a34a;
+    --success-light: #dcfce7;
+    --warning: #d97706;
+    --warning-light: #fef3c7;
+    --danger: #dc2626;
+    --gray-50: #f9fafb;
+    --gray-100: #f3f4f6;
+    --gray-200: #e5e7eb;
+    --gray-600: #4b5563;
+    --gray-800: #1f2937;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "Microsoft JhengHei", "Segoe UI", sans-serif;
+    line-height: 1.7;
+    color: var(--gray-800);
+    background: var(--gray-50);
+    padding: 2rem;
+    max-width: 960px;
+    margin: 0 auto;
+  }
+  h1 {
+    font-size: 1.8rem;
+    border-bottom: 3px solid var(--primary);
+    padding-bottom: 0.5rem;
+    margin-bottom: 0.5rem;
+  }
+  h1 small { font-size: 0.9rem; color: var(--gray-600); font-weight: normal; }
+  h2 {
+    font-size: 1.3rem;
+    margin-top: 2.5rem;
+    margin-bottom: 0.8rem;
+    color: var(--primary);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  h2 .step {
+    background: var(--primary);
+    color: #fff;
+    border-radius: 50%;
+    width: 32px; height: 32px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.9rem;
+    flex-shrink: 0;
+  }
+  h3 { font-size: 1.05rem; margin-top: 1.2rem; margin-bottom: 0.4rem; }
+  p { margin-bottom: 0.6rem; }
+  ul, ol { margin-left: 1.5rem; margin-bottom: 0.8rem; }
+  li { margin-bottom: 0.3rem; }
+
+  /* Architecture diagram */
+  .arch-box {
+    background: var(--gray-800);
+    color: #e2e8f0;
+    border-radius: 8px;
+    padding: 1.2rem 1.5rem;
+    font-family: "Cascadia Code", "Consolas", monospace;
+    font-size: 0.82rem;
+    line-height: 1.5;
+    overflow-x: auto;
+    white-space: pre;
+    margin-bottom: 1.5rem;
+  }
+  .arch-box .highlight { color: #60a5fa; }
+  .arch-box .accent { color: #34d399; }
+
+  /* Code blocks */
+  pre {
+    background: var(--gray-800);
+    color: #e2e8f0;
+    border-radius: 6px;
+    padding: 1rem 1.2rem;
+    font-family: "Cascadia Code", "Consolas", monospace;
+    font-size: 0.85rem;
+    overflow-x: auto;
+    margin-bottom: 1rem;
+    position: relative;
+  }
+  pre .label {
+    position: absolute;
+    top: 0; right: 0;
+    background: var(--primary);
+    color: #fff;
+    font-size: 0.7rem;
+    padding: 2px 10px;
+    border-radius: 0 6px 0 6px;
+  }
+  code {
+    background: var(--gray-200);
+    padding: 0.15rem 0.4rem;
+    border-radius: 3px;
+    font-family: "Cascadia Code", "Consolas", monospace;
+    font-size: 0.88em;
+  }
+  pre code { background: none; padding: 0; }
+  .comment { color: #6b7280; }
+  .string { color: #34d399; }
+  .key { color: #60a5fa; }
+  .bool { color: #f59e0b; }
+
+  /* Config comparison */
+  .config-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin-bottom: 1rem;
+  }
+  @media (max-width: 700px) {
+    .config-grid { grid-template-columns: 1fr; }
+  }
+  .config-card {
+    border: 2px solid var(--gray-200);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .config-card.master { border-color: var(--primary); }
+  .config-card.slave { border-color: var(--success); }
+  .config-card .card-header {
+    padding: 0.5rem 1rem;
+    font-weight: bold;
+    font-size: 0.95rem;
+  }
+  .config-card.master .card-header { background: var(--primary-light); color: var(--primary); }
+  .config-card.slave .card-header { background: var(--success-light); color: var(--success); }
+  .config-card pre {
+    margin: 0;
+    border-radius: 0;
+    font-size: 0.78rem;
+  }
+
+  /* File tree */
+  .file-tree {
+    background: var(--gray-100);
+    border: 1px solid var(--gray-200);
+    border-radius: 8px;
+    padding: 1rem 1.5rem;
+    font-family: "Cascadia Code", "Consolas", monospace;
+    font-size: 0.85rem;
+    line-height: 1.6;
+    margin-bottom: 1rem;
+  }
+  .file-tree .needed { color: var(--success); font-weight: bold; }
+  .file-tree .skip { color: var(--gray-600); text-decoration: line-through; }
+  .file-tree .note { color: var(--warning); font-style: italic; font-family: "Microsoft JhengHei", sans-serif; font-size: 0.8rem; }
+
+  /* Checklist table */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 1rem;
+    font-size: 0.9rem;
+  }
+  th {
+    background: var(--primary);
+    color: #fff;
+    padding: 0.6rem 0.8rem;
+    text-align: left;
+  }
+  td {
+    padding: 0.5rem 0.8rem;
+    border-bottom: 1px solid var(--gray-200);
+  }
+  tr:nth-child(even) td { background: var(--gray-100); }
+  .check { color: var(--success); font-weight: bold; }
+  .cross { color: var(--gray-600); }
+
+  /* Alert boxes */
+  .alert {
+    border-radius: 8px;
+    padding: 0.8rem 1rem;
+    margin-bottom: 1rem;
+    display: flex;
+    gap: 0.5rem;
+    align-items: flex-start;
+  }
+  .alert-warning { background: var(--warning-light); border-left: 4px solid var(--warning); }
+  .alert-info { background: var(--primary-light); border-left: 4px solid var(--primary); }
+  .alert-icon { font-size: 1.2rem; flex-shrink: 0; }
+
+  /* Startup order */
+  .startup-steps {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+    flex-wrap: wrap;
+  }
+  .startup-step {
+    background: #fff;
+    border: 2px solid var(--gray-200);
+    border-radius: 8px;
+    padding: 0.6rem 1rem;
+    text-align: center;
+    min-width: 180px;
+  }
+  .startup-step.s1 { border-color: var(--primary); }
+  .startup-step.s2 { border-color: var(--success); }
+  .startup-step .num { font-size: 1.5rem; font-weight: bold; }
+  .startup-step.s1 .num { color: var(--primary); }
+  .startup-step.s2 .num { color: var(--success); }
+  .startup-arrow { font-size: 1.5rem; color: var(--gray-600); }
+
+  footer {
+    margin-top: 3rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--gray-200);
+    color: var(--gray-600);
+    font-size: 0.8rem;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+
+<h1>三橋耳溫槍探頭套檢測系統 — 部署指南
+  <br><small>Master / Slave 雙機部署</small>
+</h1>
+
+<!-- Architecture -->
+<h2><span class="step">0</span>架構概覽</h2>
+<div class="arch-box"><span class="highlight">電腦 A (Master)</span>                         <span class="accent">電腦 B (Slave)</span>
+┌──────────────────────┐              ┌──────────────────────┐
+│  main.py             │    TCP/IP    │  main.py             │
+│  config.json         │◄────────────►│  config.json         │
+│  mode: <span class="highlight">"master"</span>      │  port 5001  │  mode: <span class="accent">"slave"</span>        │
+│  PLC 連線 ✓          │              │  PLC 連線 ✗          │
+│  CH 7-12 藍芽        │              │  CH 1-6  藍芽        │
+└──────────────────────┘              └──────────────────────┘</div>
+
+<div class="alert alert-info">
+  <span class="alert-icon">&#x1f4a1;</span>
+  <div>程式碼兩台完全相同，唯一差異在 <code>config.json</code> 的設定。</div>
+</div>
+
+<!-- Step 1 -->
+<h2><span class="step">1</span>安裝 Python 環境（兩台都要）</h2>
+<p>下載 Python 3.10 以上版本（建議 3.13），安裝時勾選 <strong>"Add to PATH"</strong>。</p>
+<pre><span class="label">CMD / PowerShell</span><code><span class="comment"># 安裝必要套件</span>
+pip install nicegui pymcprotocol</code></pre>
+
+<div class="alert alert-info">
+  <span class="alert-icon">&#x1f4a1;</span>
+  <div>藍芽通訊使用 <strong>Windows 原生 Bluetooth Socket</strong>（<code>socket.AF_BLUETOOTH</code> + <code>BTPROTO_RFCOMM</code>），Python 3.9+ 內建支援，<strong>不需要安裝額外藍芽套件</strong>。</div>
+</div>
+
+<!-- Step 2 -->
+<h2><span class="step">2</span>複製程式檔案</h2>
+<p>將以下檔案複製到兩台電腦的同一個資料夾（例如 <code>D:\3Bridge_Meter_HMI</code>）：</p>
+<div class="file-tree">
+3Bridge_Meter_HMI/
+├── <span class="needed">main.py</span>
+├── <span class="needed">config.py</span>
+├── <span class="needed">bluetooth_comm.py</span>
+├── <span class="needed">plc_comm.py</span>
+├── <span class="needed">network_comm.py</span>
+├── <span class="needed">measurement.py</span>
+├── <span class="needed">meter32x32.ico</span>
+├── <span class="needed">config.json</span>          <span class="note">← 每台電腦要各自設定！</span>
+├── logs/                <span class="note">← 自動產生，不需複製</span>
+│
+├── <span class="skip">slave_test/</span>          不需複製
+├── <span class="skip">openspec/</span>            不需複製
+├── <span class="skip">reference/</span>           不需複製
+├── <span class="skip">__pycache__/</span>         不需複製
+└── <span class="skip">.git/</span>                不需複製
+</div>
+
+<!-- Step 3 -->
+<h2><span class="step">3</span>設定 config.json（關鍵步驟）</h2>
+
+<div class="config-grid">
+  <div class="config-card master">
+    <div class="card-header">電腦 A — Master</div>
+<pre><code>{
+  <span class="key">"simulation_mode"</span>: <span class="bool">false</span>,
+
+  <span class="key">"plc"</span>: {
+    <span class="key">"enabled"</span>: <span class="bool">true</span>,
+    <span class="key">"ip_address"</span>: <span class="string">"192.168.1.10"</span>,
+    <span class="key">"port"</span>: 5000
+  },
+
+  <span class="key">"network"</span>: {
+    <span class="key">"mode"</span>: <span class="string">"master"</span>,
+    <span class="key">"master_ip"</span>: <span class="string">"192.168.1.100"</span>,
+    <span class="key">"port"</span>: 5001,
+    <span class="key">"slave_meter_offset"</span>: 6
+  },
+
+  <span class="key">"bluetooth"</span>: {
+    <span class="key">"enabled"</span>: <span class="bool">true</span>,
+    <span class="key">"device_addresses"</span>: [
+      <span class="string">"AA:BB:CC:DD:EE:01"</span>,
+      <span class="string">"AA:BB:CC:DD:EE:02"</span>,
+      <span class="comment">... Master 負責的 6 支耳溫槍</span>
+    ]
+  },
+
+  <span class="key">"measurement"</span>: {
+    <span class="key">"channel_enabled"</span>: [
+      <span class="bool">false, false, false, false, false, false</span>,
+      <span class="bool">true,  true,  true,  true,  true,  true</span>
+    ]
+    <span class="comment">// Master 管 CH 7-12（後 6 個）</span>
+  }
+}</code></pre>
+  </div>
+  <div class="config-card slave">
+    <div class="card-header">電腦 B — Slave</div>
+<pre><code>{
+  <span class="key">"simulation_mode"</span>: <span class="bool">false</span>,
+
+  <span class="key">"plc"</span>: {
+    <span class="key">"enabled"</span>: <span class="bool">false</span>,
+    <span class="comment">// Slave 不直接連 PLC</span>
+  },
+
+  <span class="key">"network"</span>: {
+    <span class="key">"mode"</span>: <span class="string">"slave"</span>,
+    <span class="key">"master_ip"</span>: <span class="string">"192.168.1.100"</span>,
+    <span class="comment">// ↑ 填 Master 的實際 IP！</span>
+    <span class="key">"port"</span>: 5001,
+    <span class="key">"slave_meter_offset"</span>: 6
+  },
+
+  <span class="key">"bluetooth"</span>: {
+    <span class="key">"enabled"</span>: <span class="bool">true</span>,
+    <span class="key">"device_addresses"</span>: [
+      <span class="string">"AA:BB:CC:DD:EE:07"</span>,
+      <span class="string">"AA:BB:CC:DD:EE:08"</span>,
+      <span class="comment">... Slave 負責的 6 支耳溫槍</span>
+    ]
+  },
+
+  <span class="key">"measurement"</span>: {
+    <span class="key">"channel_enabled"</span>: [
+      <span class="bool">true,  true,  true,  true,  true,  true</span>,
+      <span class="bool">false, false, false, false, false, false</span>
+    ]
+    <span class="comment">// Slave 管 CH 1-6（前 6 個）</span>
+  }
+}</code></pre>
+  </div>
+</div>
+
+<!-- Step 4 -->
+<h2><span class="step">4</span>網路設定</h2>
+<ol>
+  <li>兩台電腦必須在<strong>同一個區域網路</strong>（同一個 switch / router）</li>
+  <li>建議設定靜態 IP：
+    <ul>
+      <li>Master: <code>192.168.1.100</code></li>
+      <li>Slave: <code>192.168.1.101</code></li>
+    </ul>
+  </li>
+  <li><strong>Master 電腦的 Windows 防火牆</strong>必須開放 TCP port 5001</li>
+</ol>
+
+<div class="alert alert-warning">
+  <span class="alert-icon">&#x26a0;&#xfe0f;</span>
+  <div>防火牆未開放 port 5001 是最常見的連線失敗原因！</div>
+</div>
+
+<pre><span class="label">PowerShell（管理員）— Master 電腦執行</span><code><span class="comment"># 開放防火牆 port 5001</span>
+netsh advfirewall firewall add rule name="3Bridge HMI" dir=in action=allow protocol=TCP localport=5001</code></pre>
+
+<!-- Step 5 -->
+<h2><span class="step">5</span>建立啟動捷徑</h2>
+
+<p>在兩台電腦的程式資料夾中各建一個 <code>啟動系統.bat</code>：</p>
+
+<pre><span class="label">啟動系統.bat（兩台相同）</span><code>@echo off
+cd /d "%~dp0"
+start "" python main.py
+exit</code></pre>
+
+<p>程式會自動讀取同目錄下的 <code>config.json</code>，依據 <code>mode</code> 決定 Master 或 Slave 行為。</p>
+
+<!-- Step 6 -->
+<h2><span class="step">6</span>啟動順序</h2>
+
+<div class="startup-steps">
+  <div class="startup-step s1">
+    <div class="num">1</div>
+    <div>先啟動 <strong>Master</strong></div>
+    <div style="font-size:0.8rem;color:var(--gray-600)">開始監聽 port 5001</div>
+  </div>
+  <span class="startup-arrow">&#x27A1;</span>
+  <div class="startup-step s2">
+    <div class="num">2</div>
+    <div>再啟動 <strong>Slave</strong></div>
+    <div style="font-size:0.8rem;color:var(--gray-600)">自動連線至 Master</div>
+  </div>
+</div>
+
+<p>Slave 斷線後每 <strong>3 秒</strong>自動重連，無需手動介入。</p>
+
+<!-- Checklist -->
+<h2><span class="step">&#x2713;</span>部署檢查清單</h2>
+
+<table>
+  <thead>
+    <tr><th>檢查項目</th><th>Master</th><th>Slave</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Python 3.10+ 已安裝</td>
+      <td class="check">&#x2713; 必要</td>
+      <td class="check">&#x2713; 必要</td>
+    </tr>
+    <tr>
+      <td><code>nicegui</code> 已安裝</td>
+      <td class="check">&#x2713; 必要</td>
+      <td class="check">&#x2713; 必要</td>
+    </tr>
+    <tr>
+      <td><code>pymcprotocol</code> 已安裝</td>
+      <td class="check">&#x2713; 必要</td>
+      <td class="cross">&#x2717; 不需要</td>
+    </tr>
+    <tr>
+      <td>藍芽 (Windows 原生)</td>
+      <td class="check">&#x2713; 內建免安裝</td>
+      <td class="check">&#x2713; 內建免安裝</td>
+    </tr>
+    <tr>
+      <td>config.json <code>mode</code></td>
+      <td><code>"master"</code></td>
+      <td><code>"slave"</code></td>
+    </tr>
+    <tr>
+      <td>config.json <code>master_ip</code></td>
+      <td class="cross">— 不重要</td>
+      <td><strong>填 Master 的 IP</strong></td>
+    </tr>
+    <tr>
+      <td>config.json <code>plc.enabled</code></td>
+      <td><code>true</code></td>
+      <td><code>false</code></td>
+    </tr>
+    <tr>
+      <td>防火牆開放 port 5001</td>
+      <td class="check">&#x2713; 必要</td>
+      <td class="cross">— 不需要</td>
+    </tr>
+    <tr>
+      <td>藍芽 MAC 地址已設定</td>
+      <td>各自的耳溫槍</td>
+      <td>各自的耳溫槍</td>
+    </tr>
+    <tr>
+      <td>同一區域網路</td>
+      <td class="check">&#x2713;</td>
+      <td class="check">&#x2713;</td>
+    </tr>
+  </tbody>
+</table>
+
+<footer>
+  三橋耳溫槍探頭套檢測系統 v2.1.0 — 部署指南
+</footer>
+
+</body>
+</html>

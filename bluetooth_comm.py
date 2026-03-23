@@ -135,13 +135,22 @@ class BluetoothProtocol:
 class BluetoothManager:
     """藍芽連線管理器"""
 
-    def __init__(self, simulation_mode: bool = True):
+    def __init__(self, simulation_mode: bool = True,
+                 connect_timeout: float = 10.0,
+                 reconnect_interval: float = 5.0):
         self.simulation_mode = simulation_mode
+        self.connect_timeout = connect_timeout
+        self.reconnect_interval = reconnect_interval
         self.devices: Dict[int, ThermometerDevice] = {}  # channel -> device
         self._running = False
         self._threads: List[threading.Thread] = []
         self._on_data_callback: Optional[Callable[[int, ThermometerData], None]] = None
         self._on_state_callback: Optional[Callable[[int, ConnectionState], None]] = None
+        self._is_channel_enabled: Optional[Callable[[int], bool]] = None
+        self._get_channel_name: Optional[Callable[[int], str]] = None
+
+        # 追蹤正在連線中的 socket（用於 stop 時中斷）
+        self._connecting_sockets: Dict[int, socket.socket] = {}
 
         # 每個設備的接收 buffer
         self._recv_buffers: Dict[int, bytes] = {}
@@ -152,10 +161,22 @@ class BluetoothManager:
 
     def set_callbacks(self,
                       on_data: Optional[Callable[[int, ThermometerData], None]] = None,
-                      on_state: Optional[Callable[[int, ConnectionState], None]] = None):
+                      on_state: Optional[Callable[[int, ConnectionState], None]] = None,
+                      is_channel_enabled: Optional[Callable[[int], bool]] = None,
+                      get_channel_name: Optional[Callable[[int], str]] = None):
         """設定回呼函式"""
         self._on_data_callback = on_data
         self._on_state_callback = on_state
+        if is_channel_enabled is not None:
+            self._is_channel_enabled = is_channel_enabled
+        if get_channel_name is not None:
+            self._get_channel_name = get_channel_name
+
+    def _ch_name(self, channel: int) -> str:
+        """取得通道顯示名稱"""
+        if self._get_channel_name:
+            return self._get_channel_name(channel)
+        return f"通道{channel}"
 
     def add_device(self, channel: int, mac_address: str):
         """新增設備"""
@@ -170,22 +191,79 @@ class BluetoothManager:
             return
 
         self._running = True
+
+        # 每個設備啟動獨立的資料接收 thread
         for channel, device in self.devices.items():
-            # 模擬模式不需要 MAC 地址
             if device.mac_address or self.simulation_mode:
                 thread = threading.Thread(
-                    target=self._device_thread,
+                    target=self._receive_thread,
                     args=(channel,),
                     daemon=True
                 )
                 thread.start()
                 self._threads.append(thread)
 
+        if not self.simulation_mode:
+            # 實體模式：啟動單一連線管理 thread（依序連接，不互搶）
+            conn_thread = threading.Thread(target=self._connection_manager, daemon=True)
+            conn_thread.start()
+            self._threads.append(conn_thread)
+
+    def _connection_manager(self):
+        """單一 thread 依序管理所有設備的連線（像手動一台一台開）"""
+        fail_counts = {ch: 0 for ch in self.devices}
+
+        while self._running:
+            any_need_connect = False
+            for channel, device in self.devices.items():
+                if not self._running:
+                    return
+                # 跳過停用的通道
+                if self._is_channel_enabled and not self._is_channel_enabled(channel):
+                    continue
+                # 跳過已連線或沒有 MAC 的
+                if device.state == ConnectionState.CONNECTED or not device.mac_address:
+                    fail_counts[channel] = 0
+                    continue
+
+                any_need_connect = True
+                self._connect_device(device)
+
+                if device.state == ConnectionState.CONNECTED:
+                    fail_counts[channel] = 0
+                    print(f"[*] {self._ch_name(channel)} 已連線，繼續下一台...")
+                else:
+                    fail_counts[channel] += 1
+                    fc = fail_counts[channel]
+                    if fc >= 3:
+                        wait = min(self.reconnect_interval * fc, 30.0)
+                        print(f"[!] {self._ch_name(channel)} 連續失敗 {fc} 次，跳過")
+
+            # 一輪掃完，等待後再掃
+            if any_need_connect:
+                time.sleep(self.reconnect_interval)
+            else:
+                time.sleep(2.0)  # 全部已連線，低頻檢查斷線
+
     def stop(self):
         """停止藍芽管理器"""
         self._running = False
+        # 關閉正在等待 connect() 的 socket（中斷 timeout 等待）
+        for sock in self._connecting_sockets.values():
+            try:
+                sock.close()
+            except:
+                pass
+        self._connecting_sockets.clear()
+        # 關閉已連線的 socket
         for device in self.devices.values():
-            self._disconnect_device(device)
+            if device.socket:
+                try:
+                    device.socket.close()
+                except:
+                    pass
+                device.socket = None
+            device.state = ConnectionState.DISCONNECTED
 
     def send_ack(self, channel: int, success: bool = True) -> bool:
         """發送 CB 回應 (ACK)"""
@@ -206,7 +284,7 @@ class BluetoothManager:
             device.socket.send(packet)
             return True
         except Exception as e:
-            print(f"發送 CB 回應失敗 (通道 {channel}): {e}")
+            print(f"發送 CB 回應失敗 ({self._ch_name(channel)}): {e}")
             return False
 
     def request_measurement(self, channel: int) -> bool:
@@ -228,7 +306,7 @@ class BluetoothManager:
             device.socket.send(packet)
             return True
         except Exception as e:
-            print(f"發送 CD 指令失敗 (通道 {channel}): {e}")
+            print(f"發送 CD 指令失敗 ({self._ch_name(channel)}): {e}")
             return False
 
     def request_all_measurements(self) -> int:
@@ -262,27 +340,28 @@ class BluetoothManager:
         self._sim_empty_values.clear()
         self._sim_is_empty_measure = True
 
-    def _device_thread(self, channel: int):
-        """設備連線執行緒"""
+    def _receive_thread(self, channel: int):
+        """設備資料接收 thread（只負責收資料，不負責連線）"""
         device = self.devices[channel]
 
-        # 如果沒有 MAC 位址，直接結束執行緒，避免無窮重試
-        if not device.mac_address and not self.simulation_mode:
-            print(f"[!] 通道 {channel} 未設定 MAC 位址，停止連線執行緒")
-            return
+        if self.simulation_mode:
+            # 模擬模式：直接設為已連線
+            time.sleep(0.5)
+            self._update_state(device, ConnectionState.CONNECTED)
 
         while self._running:
-            if device.state in (ConnectionState.DISCONNECTED, ConnectionState.ERROR):
-                self._connect_device(device)
+            # 通道停用時：斷開連線
+            if self._is_channel_enabled and not self._is_channel_enabled(channel):
+                if device.state == ConnectionState.CONNECTED:
+                    self._disconnect_device(device)
+                time.sleep(2.0)
+                continue
 
             if device.state == ConnectionState.CONNECTED:
                 self._receive_data(device)
-
-            # 如果斷線了，等久一點再重試，避免造成 WinError 10048
-            if device.state != ConnectionState.CONNECTED:
-                time.sleep(5.0)
-            else:
                 time.sleep(0.1)
+            else:
+                time.sleep(1.0)  # 未連線時低頻等待，連線由 _connection_manager 處理
 
     def _connect_device(self, device: ThermometerDevice):
         """連接設備 (使用 Windows 原生藍芽 socket)"""
@@ -299,40 +378,28 @@ class BluetoothManager:
             return
 
         try:
-            print(f"[*] 嘗試建立 Bluetooth Socket -> {device.mac_address} (通道 {device.channel})")
-            # Windows 原生藍芽 RFCOMM socket
+            print(f"[*] 嘗試連線 {self._ch_name(device.channel)} -> {device.mac_address}")
             sock = socket.socket(
                 socket.AF_BLUETOOTH,
                 socket.SOCK_STREAM,
                 socket.BTPROTO_RFCOMM
             )
-            sock.settimeout(10)
-            # 嘗試連接頻道 1 (SPP 標準頻道)
+            self._connecting_sockets[device.channel] = sock
+            sock.settimeout(self.connect_timeout)
             sock.connect((device.mac_address, 1))
+            self._connecting_sockets.pop(device.channel, None)
             sock.settimeout(2)
             device.socket = sock
-            print(f"[+] 藍芽連線成功: {device.mac_address}")
+            print(f"[+] 藍芽連線成功: {self._ch_name(device.channel)} ({device.mac_address})")
             self._update_state(device, ConnectionState.CONNECTED)
         except Exception as e:
-            # 確保失敗時關閉 Socket，釋放資源
+            self._connecting_sockets.pop(device.channel, None)
             try:
                 sock.close()
             except:
                 pass
-                
-            error_msg = str(e)
-            print(f"[!] 藍芽連線失敗 ({device.mac_address}): {type(e).__name__} - {error_msg}")
-            
-            if "10049" in error_msg:
-                print("    提示: MAC 位址格式可能錯誤或無效")
-            elif "10061" in error_msg or "10060" in error_msg:
-                print("    提示: 找不到設備，請確認設備已開啟且在範圍內")
-            elif "10056" in error_msg or "10013" in error_msg or "10048" in error_msg:
-                print("    提示: 頻道被佔用或請求過於頻繁，請稍候再試")
-            
+            print(f"[!] {self._ch_name(device.channel)} 連線失敗: {e}")
             self._update_state(device, ConnectionState.ERROR)
-            # 增加等待時間，避免 WinError 10048
-            time.sleep(10) 
 
 
     def _disconnect_device(self, device: ThermometerDevice):
@@ -354,7 +421,7 @@ class BluetoothManager:
             data = device.socket.recv(1024)
             if not data:
                 # 對方關閉連線
-                print(f"連線中斷 (通道 {device.channel}): 對方已關閉")
+                print(f"連線中斷 ({self._ch_name(device.channel)}): 對方已關閉")
                 self._disconnect_device(device)
                 return
 
@@ -390,7 +457,7 @@ class BluetoothManager:
             pass
         except (ConnectionResetError, ConnectionAbortedError, OSError) as e:
             # 連線異常斷開
-            print(f"連線異常 (通道 {device.channel}): {e}")
+            print(f"連線異常 ({self._ch_name(device.channel)}): {e}")
             self._disconnect_device(device)
 
     def _simulate_measurement(self, channel: int):

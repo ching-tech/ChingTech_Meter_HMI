@@ -48,11 +48,13 @@ class MeasurementManager:
     def __init__(self, channel_count: int = 12,
                  tolerance_upper: float = 0.5,
                  tolerance_lower: float = -0.5,
-                 log_dir: str = "logs"):
+                 log_dir: str = "logs",
+                 enable_logging: bool = True):
         self.channel_count = channel_count
         self.tolerance_upper = tolerance_upper
         self.tolerance_lower = tolerance_lower
         self.log_dir = log_dir
+        self.enable_logging = enable_logging
 
         self._state = MeasurementState.IDLE
         self._channels: Dict[int, ChannelData] = {}
@@ -66,8 +68,9 @@ class MeasurementManager:
         self._on_channel_update: Optional[Callable[[int, ChannelData], None]] = None
         self._on_complete: Optional[Callable[[MeasurementResult], None]] = None
 
-        # 確保 log 目錄存在
-        os.makedirs(self.log_dir, exist_ok=True)
+        # 確保 log 目錄存在 (僅在啟用記錄時建立)
+        if self.enable_logging:
+            os.makedirs(self.log_dir, exist_ok=True)
 
     def _init_channels(self):
         """初始化通道資料"""
@@ -109,6 +112,8 @@ class MeasurementManager:
 
     def start_new_batch(self):
         """開始新批次，建立新的 CSV 檔案並寫入標題列"""
+        if not self.enable_logging:
+            return None
         now = datetime.now()
         timestamp = now.strftime("%Y%m%d%H%M%S")
         self.current_log_file = os.path.join(self.log_dir, f"{timestamp}.csv")
@@ -270,7 +275,7 @@ class MeasurementManager:
 
     def save_cycle_log(self, is_empty: bool = False, plc_data=None,
                        ear_covers: Dict[int, str] = None,
-                       enabled_channels: List[int] = None):
+                       enabled_channels: List[int] = None) -> bool:
         """保存單次量測的一列 54 欄位資料至 CSV (每次 D515/D500 觸發時呼叫)
 
         Args:
@@ -278,7 +283,12 @@ class MeasurementManager:
             plc_data: PLC 資料物件
             ear_covers: 各通道耳套狀態 dict {channel: "1111"/"0000"}
             enabled_channels: 已啟用的通道列表
+
+        Returns:
+            True=寫入成功, False=寫入失敗或未啟用
         """
+        if not self.enable_logging:
+            return False
         if not self.current_log_file:
             self.start_new_batch()
 
@@ -358,8 +368,10 @@ class MeasurementManager:
                     row.append(0)
 
                 writer.writerow(row)
+            return True
         except Exception as e:
             print(f"寫入量測記錄失敗: {e}")
+            return False
 
     def get_log_filepath(self) -> str:
         return self.current_log_file if self.current_log_file else ""

@@ -86,7 +86,7 @@
 
 ## External Dependencies
 - **NiceGUI** - UI 框架
-- **PyBluez** - 經典藍芽 SPP 通訊
+- **Python socket (AF_BLUETOOTH)** - Windows 原生藍芽 RFCOMM 通訊 (Python 3.9+ 內建)
 - **pymcprotocol** - 三菱 MC Protocol
 - **三菱 5U PLC** - 外部硬體
 - **耳溫槍 x12** - 藍芽 SPP 設備

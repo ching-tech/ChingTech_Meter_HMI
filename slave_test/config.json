@@ -5,6 +5,7 @@
   "window_height": 850,
   "simulation_mode": false,
   "log_dir": "slave_test/logs",
+  "current_batch": "",
   "bluetooth": {
     "enabled": true,
     "device_addresses": [
@@ -34,12 +35,12 @@
     "tolerance_lower": 0.2,
     "meter_count": 12,
     "channel_enabled": [
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
       true,
       false,
       false,

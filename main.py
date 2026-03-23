@@ -7,10 +7,42 @@ import os
 import socket
 import ctypes
 import multiprocessing
+
+# 設定 Windows 工作列獨立圖示（不跟 python.exe 共用）
+ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('com.3bridge.meter-hmi')
 import datetime
 import threading
 import asyncio
 import time
+
+# --- CMD 輸出同時寫入 log 檔 ---
+class _TeeWriter:
+    """同時輸出到 console 和 log 檔案"""
+    def __init__(self, original, log_file):
+        self.original = original
+        self.log_file = log_file
+    def write(self, text):
+        self.original.write(text)
+        try:
+            self.log_file.write(text)
+            self.log_file.flush()
+        except Exception:
+            pass
+    def flush(self):
+        self.original.flush()
+    def isatty(self):
+        return self.original.isatty()
+    def fileno(self):
+        return self.original.fileno()
+    def __getattr__(self, name):
+        return getattr(self.original, name)
+
+if multiprocessing.current_process().name == 'MainProcess':
+    os.makedirs('logs', exist_ok=True)
+    _log_filename = f'logs/debug_{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}.txt'
+    _log_file = open(_log_filename, 'w', encoding='utf-8')
+    sys.stdout = _TeeWriter(sys.stdout, _log_file)
+    sys.stderr = _TeeWriter(sys.stderr, _log_file)
 
 from nicegui import ui, app
 
@@ -23,6 +55,7 @@ from measurement import MeasurementManager, MeasurementState, JudgeResult, Chann
 # --- 全域變數 ---
 is_shutting_down = False
 prev_bt_states = {}
+slave_bt_connecting_since = {}  # Slave 通道進入 CONNECTING 的時間戳 {ch: timestamp}
 ear_cover_statuses = {}  # 儲存各通道最新的耳套狀態 (1111/0000)
 managers_initialized = False
 meters_ui = {}          
@@ -39,18 +72,22 @@ system_status_label = None
 measure_status_label = None 
 current_batch_label = None  # 顯示目前批次檔名
 plc_monitor_ui = {}         
-system_running = False      
+system_running = False
+slave_channel_enabled = {}  # Slave 回報的通道啟用狀態 {ch: bool}
 
 # --- 設定面板元件 ---
 settings_drawer = None
 timing_inputs = {}
 plc_inputs = {}
 bt_inputs = {}
-bt_mac_inputs = {}              
+bt_mac_inputs = {}
+net_inputs = {}              
 channel_switches = {}       
 mode_select = None          
-tolerance_upper_input = None  
-tolerance_lower_input = None  
+tolerance_upper_input = None
+tolerance_lower_input = None
+empty_upper_input = None
+empty_lower_input = None
 
 # --- 異常警告元件 ---
 alert_container = None
@@ -67,8 +104,12 @@ def init_managers():
     managers_initialized = True
 
     # 藍芽管理器
-    bt_manager = BluetoothManager(simulation_mode=config.simulation_mode)
-    bt_manager.set_callbacks(on_data=on_bluetooth_data, on_state=on_bluetooth_state)
+    bt_manager = BluetoothManager(
+        simulation_mode=config.simulation_mode,
+        connect_timeout=config.bluetooth.timeout,
+        reconnect_interval=config.bluetooth.reconnect_interval
+    )
+    bt_manager.set_callbacks(on_data=on_bluetooth_data, on_state=on_bluetooth_state, is_channel_enabled=is_channel_enabled, get_channel_name=get_channel_display_name)
 
     if config.network.mode == "master":
         for i in range(1, 7):
@@ -97,14 +138,16 @@ def init_managers():
     # 網路管理器
     role = NetworkRole.MASTER if config.network.mode == "master" else NetworkRole.SLAVE
     net_manager = NetworkManager(role=role, port=config.network.port, master_ip=config.network.master_ip)
-    net_manager.set_callbacks(on_data=on_network_data, on_state=on_network_state, on_command=on_network_command)
+    net_manager.set_callbacks(on_data=on_network_data, on_state=on_network_state, on_command=on_network_command, on_channel_enabled=on_slave_channel_enabled)
 
-    # 量測管理器
+    # 量測管理器 (Slave 不需要寫入 CSV)
+    is_master = config.network.mode == "master"
     measure_manager = MeasurementManager(
         channel_count=config.measurement.meter_count,
         tolerance_upper=config.measurement.tolerance_upper,
         tolerance_lower=config.measurement.tolerance_lower,
-        log_dir=config.log_dir
+        log_dir=config.log_dir,
+        enable_logging=is_master
     )
     measure_manager.set_callbacks(
         on_state=on_measurement_state,
@@ -125,8 +168,8 @@ def init_managers():
         system_status_label.classes('text-green-400', remove='text-red-400')
     log_message("系統服務已全面啟動")
     
-    # 沿用 config 中的批次，或建立新批次
-    if measure_manager:
+    # 沿用 config 中的批次，或建立新批次 (僅 Master 需要寫入 CSV)
+    if measure_manager and config.network.mode == "master":
         resumed = False
         if config.current_batch:
             filepath = measure_manager.resume_batch(config.current_batch)
@@ -165,16 +208,15 @@ def on_bluetooth_data(channel: int, data: ThermometerData):
     if config.network.mode == "slave" and channel in meters_ui:
         meter = meters_ui[channel]
         try:
-            is_empty = measure_manager and measure_manager.state in (
-                MeasurementState.WAITING_EMPTY, MeasurementState.EMPTY_DONE
-            )
+            state = measure_manager.state if measure_manager else None
+            is_empty = state in (MeasurementState.WAITING_EMPTY, MeasurementState.EMPTY_DONE)
             with meter['temp_display'].client:
                 if is_empty:
                     meter['empty_display'].set_value(data.temperature)
                 else:
                     meter['temp_display'].set_value(data.temperature)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[!] Slave UI 更新失敗 (通道 {channel}): {e}")
 
     if config.network.mode == "slave" and net_manager:
         packet = MeterDataPacket(
@@ -231,16 +273,20 @@ def log_message(msg: str):
                 log_console.push(formatted)
     except: pass
 
+def show_alert(message: str):
+    """顯示通用警報"""
+    if is_shutting_down or not alert_container or not alert_message_label: return
+    with alert_container.client:
+        alert_message_label.set_text(f'⚠ {message}')
+        alert_container.set_visibility(True)
+        start_alert_flash()
+
 def show_bt_disconnect_alert(channel: int):
     global alert_flash_timer, is_alert_visible
     if is_shutting_down or not alert_container or not alert_message_label: return
     display_name = get_channel_display_name(channel)
     current_time = datetime.datetime.now().strftime("%H:%M:%S")
-    # 使用 client 上下文保護
-    with alert_container.client:
-        alert_message_label.set_text(f'⚠ [{current_time}] {display_name} 藍芽斷線!')
-        alert_container.set_visibility(True)
-        start_alert_flash()
+    show_alert(f'[{current_time}] {display_name} 藍芽斷線!')
 
 def on_plc_state(state: PLCConnectionState):
     if plc_status_icon:
@@ -255,6 +301,7 @@ def on_plc_reset():
 
 def on_plc_empty_trigger():
     log_message("[PLC] 空槍量測觸發")
+    clear_meter_values(is_empty=True)
     try:
         measure_manager.start_empty_measurement()
         if config.simulation_mode: bt_manager.set_simulation_mode_empty()
@@ -262,7 +309,7 @@ def on_plc_empty_trigger():
         threading.Timer(config.timing.empty_collect_delay, trigger_empty_ack_and_collect).start()
     except Exception as e:
         log_message(f"[錯誤] 無法啟動空槍量測: {e}")
-        if plc_manager: plc_manager.clear_empty_trigger()
+        # 不清除 D515，因為未寫入空槍值至 Log (D515=0 代表空槍值已寫入)
 
 def trigger_empty_ack_and_collect():
     # 通知 Slave 請求量測
@@ -276,6 +323,7 @@ def trigger_empty_ack_and_collect():
 
 def on_plc_measure_trigger():
     log_message("[PLC] 溫度量測觸發")
+    clear_meter_values(is_empty=False)
     try:
         measure_manager.start_temperature_measurement()
         if config.simulation_mode: bt_manager.set_simulation_mode_measure()
@@ -283,7 +331,7 @@ def on_plc_measure_trigger():
         threading.Timer(config.timing.measure_collect_delay, trigger_measure_ack_and_collect).start()
     except Exception as e:
         log_message(f"[錯誤] 無法執行溫度量測: {e}")
-        if plc_manager: plc_manager.write_complete_signal()
+        # 不清除 D500，因為未寫入檢測結果 (D500=0 代表結果已寫入)
 
 def trigger_measure_ack_and_collect():
     # 通知 Slave 請求量測
@@ -302,15 +350,32 @@ def on_network_data(packet: MeterDataPacket):
     if packet.bt_state:
         try:
             bt_state = ConnectionState(packet.bt_state)
+            old_state = prev_bt_states.get(ch)
+            prev_bt_states[ch] = bt_state
             update_meter_bt_status(ch, bt_state)
-            # 同步更新 PLC D513 藍芽錯誤遮罩 (停用通道不寫入)
-            if plc_manager and is_channel_enabled(ch):
+
+            # 追蹤 CONNECTING 超時
+            if bt_state == ConnectionState.CONNECTING:
+                if ch not in slave_bt_connecting_since:
+                    slave_bt_connecting_since[ch] = time.time()
+            else:
+                slave_bt_connecting_since.pop(ch, None)
+
+            if is_channel_enabled(ch) and bt_state != old_state:
                 try:
-                    logical_num = int(get_channel_display_name(ch).replace('CH', ''))
+                    logical_num = int(display_name.replace('CH', ''))
                 except:
                     logical_num = ch
-                is_error = bt_state in (ConnectionState.DISCONNECTED, ConnectionState.ERROR)
-                plc_manager.set_bt_error(logical_num, is_error)
+
+                if bt_state in (ConnectionState.DISCONNECTED, ConnectionState.ERROR):
+                    log_message(f"[警告] {display_name} (Slave) 藍芽已斷線!")
+                    show_bt_disconnect_alert(ch)
+                    if plc_manager: plc_manager.set_bt_error(logical_num, True)
+                elif bt_state == ConnectionState.CONNECTED:
+                    log_message(f"[恢復] {display_name} (Slave) 藍芽已連線")
+                    if plc_manager: plc_manager.set_bt_error(logical_num, False)
+                elif bt_state == ConnectionState.CONNECTING:
+                    if plc_manager: plc_manager.set_bt_error(logical_num, True)
         except ValueError:
             pass
 
@@ -328,9 +393,10 @@ def on_network_data(packet: MeterDataPacket):
 
 def on_network_state(state: NetworkState):
     if network_status_icon:
-        if state == NetworkState.CONNECTED: network_status_icon.props('color=green')
-        elif state == NetworkState.LISTENING: network_status_icon.props('color=yellow')
-        else: network_status_icon.props('color=red')
+        with network_status_icon.client:
+            if state == NetworkState.CONNECTED: network_status_icon.props('color=green')
+            elif state == NetworkState.LISTENING: network_status_icon.props('color=yellow')
+            else: network_status_icon.props('color=red')
 
     # Slave 模式：網路連線建立後，補送所有通道的藍芽狀態給 Master
     if state == NetworkState.CONNECTED and config.network.mode == "slave" and bt_manager and net_manager:
@@ -343,14 +409,41 @@ def on_network_state(state: NetworkState):
             )
             net_manager.send_data(packet)
         log_message("[NET] 已補送所有通道藍芽狀態至 Master")
+        # 補送通道啟用狀態
+        _sync_slave_channel_enabled()
+
+def on_slave_channel_enabled(channels: dict):
+    """Master 收到 Slave 的通道啟用狀態"""
+    global slave_channel_enabled
+    slave_channel_enabled = channels
+    # 檢查 Master 與 Slave 通道設定是否一致
+    mismatch = []
+    for ch, slave_enabled in channels.items():
+        master_enabled = is_channel_enabled(ch)
+        if master_enabled and not slave_enabled:
+            mismatch.append(get_channel_display_name(ch))
+    if mismatch:
+        msg = f"[警告] Slave 已停用通道: {', '.join(mismatch)}，但 Master 仍為啟用"
+        log_message(msg)
+        show_alert(msg)
+
+def _sync_slave_channel_enabled():
+    """Slave 端：傳送通道啟用狀態給 Master"""
+    if config.network.mode != "slave" or not net_manager:
+        return
+    ch_state = {}
+    for ch in range(7, 13):
+        ch_state[ch] = is_channel_enabled(ch)
+    net_manager.send_channel_enabled(ch_state)
 
 def on_network_command(command: str):
     """Slave 收到 Master 指令"""
     if command == "request_empty":
         log_message("[NET] 收到 Master 空槍量測請求")
+        clear_meter_values(is_empty=True)
         # 設定量測狀態 (讓 Slave UI 顯示在正確欄位)
         if measure_manager:
-            measure_manager.state = MeasurementState.WAITING_EMPTY
+            measure_manager.start_empty_measurement()
         if config.simulation_mode and bt_manager:
             bt_manager.set_simulation_mode_empty()
         if bt_manager:
@@ -359,8 +452,9 @@ def on_network_command(command: str):
                     bt_manager.request_measurement(ch)
     elif command == "request_measure":
         log_message("[NET] 收到 Master 溫度量測請求")
+        clear_meter_values(is_empty=False)
         if measure_manager:
-            measure_manager.state = MeasurementState.WAITING_MEASURE
+            measure_manager.start_temperature_measurement()
         if config.simulation_mode and bt_manager:
             bt_manager.set_simulation_mode_measure()
         if bt_manager:
@@ -390,8 +484,8 @@ def on_channel_update(channel: int, data: ChannelData):
 def on_measurement_complete(result):
     log_message(f"[量測完成] PASS: {result.pass_count}, FAIL: {result.fail_count}")
     
-    # 執行 5 橫列批次 Log 紀錄
-    if measure_manager:
+    # 執行 5 橫列批次 Log 紀錄 (僅 Master)
+    if measure_manager and config.network.mode == "master":
         measure_manager.save_cycle_log(
             plc_data=plc_manager.plc_data if plc_manager else None,
             ear_covers=ear_cover_statuses,
@@ -447,11 +541,23 @@ def collect_empty_values():
     if config.network.mode == "master" and net_manager:
         for ch, pkt in net_manager.get_all_received_data().items():
             if is_channel_enabled(ch): values[ch] = pkt.temperature
+    # 檢查空槍值是否超出上下限
+    out_of_range = []
+    for ch, val in values.items():
+        if val > config.measurement.empty_upper or val < config.measurement.empty_lower:
+            display_name = get_channel_display_name(ch)
+            out_of_range.append(f'{display_name}={val:.2f}°C')
+    if out_of_range:
+        current_time = datetime.datetime.now().strftime("%H:%M:%S")
+        show_alert(f'[{current_time}] 空槍值異常: {", ".join(out_of_range)} (範圍: {config.measurement.empty_lower:.1f}~{config.measurement.empty_upper:.1f}°C)')
+        log_message(f"[警報] 空槍值超出範圍: {', '.join(out_of_range)}")
+
     measure_manager.record_empty_values(values)
 
-    # 空槍觸發寫入一列 Log
-    if measure_manager:
-        measure_manager.save_cycle_log(
+    # 空槍觸發寫入一列 Log (僅 Master)，寫入成功後才清除 D515
+    log_saved = False
+    if measure_manager and config.network.mode == "master":
+        log_saved = measure_manager.save_cycle_log(
             is_empty=True,
             plc_data=plc_manager.plc_data if plc_manager else None,
             ear_covers=ear_cover_statuses,
@@ -459,9 +565,9 @@ def collect_empty_values():
         )
 
     update_plc_display()
-    if plc_manager:
+    if plc_manager and log_saved:
         plc_manager.clear_empty_trigger()
-        log_message("[PLC] 空槍量測完成，清除 D515")
+        log_message("[PLC] 空槍值已寫入 Log，清除 D515")
 
 def collect_measure_values():
     values = {}
@@ -490,6 +596,24 @@ def update_channel_disabled_display():
                 except:
                     logical_num = ch
                 plc_manager.set_bt_error(logical_num, False)
+
+def clear_meter_values(is_empty: bool):
+    """收到量測訊號時，先將 UI 對應欄位清 0，避免顯示舊數據"""
+    for ch, meter in meters_ui.items():
+        if not is_channel_enabled(ch):
+            continue
+        try:
+            with meter['light'].client:
+                if is_empty:
+                    meter['empty_display'].set_value(0.00)
+                else:
+                    meter['temp_display'].set_value(0.00)
+                    meter['error_display'].set_value(0.00)
+                    meter['light'].props('color=grey')
+                    meter['text'].set_text('WAIT')
+                    meter['text'].classes('text-gray-500', remove='text-green-500 text-red-500')
+        except Exception:
+            pass
 
 def update_meter_display(channel: int, data: ChannelData):
     if is_shutting_down or channel not in meters_ui: return
@@ -558,18 +682,25 @@ def toggle_settings():
 
 def _collect_settings_from_ui():
     """從 UI 收集所有設定值寫入 config"""
-    config.measurement.tolerance_upper = tolerance_upper_input.value
-    config.measurement.tolerance_lower = tolerance_lower_input.value
+    if tolerance_upper_input: config.measurement.tolerance_upper = tolerance_upper_input.value
+    if tolerance_lower_input: config.measurement.tolerance_lower = tolerance_lower_input.value
+    if empty_upper_input: config.measurement.empty_upper = empty_upper_input.value
+    if empty_lower_input: config.measurement.empty_lower = empty_lower_input.value
     config.network.mode = mode_select.value
-    config.timing.empty_collect_delay = timing_inputs['empty_collect_delay'].value
-    config.timing.measure_collect_delay = timing_inputs['measure_collect_delay'].value
-    config.timing.bt_request_interval = timing_inputs['bt_request_interval'].value
-    config.timing.plc_poll_interval = timing_inputs['plc_poll_interval'].value
-    config.timing.result_hold_time = timing_inputs['result_hold_time'].value
-    config.plc.ip_address = plc_inputs['ip_address'].value
-    config.plc.port = int(plc_inputs['port'].value)
+    if config.network.mode == "slave":
+        config.plc.enabled = False
+    if net_inputs.get('master_ip'): config.network.master_ip = net_inputs['master_ip'].value
+    if net_inputs.get('port'): config.network.port = int(net_inputs['port'].value)
+    if timing_inputs.get('empty_collect_delay'): config.timing.empty_collect_delay = timing_inputs['empty_collect_delay'].value
+    if timing_inputs.get('measure_collect_delay'): config.timing.measure_collect_delay = timing_inputs['measure_collect_delay'].value
+    if plc_inputs.get('ip_address'): config.plc.ip_address = plc_inputs['ip_address'].value
+    if plc_inputs.get('port'): config.plc.port = int(plc_inputs['port'].value)
     config.bluetooth.reconnect_interval = bt_inputs['reconnect_interval'].value
     config.bluetooth.timeout = bt_inputs['timeout'].value
+    # 同步到 bt_manager（運行中即時生效）
+    if bt_manager:
+        bt_manager.connect_timeout = config.bluetooth.timeout
+        bt_manager.reconnect_interval = config.bluetooth.reconnect_interval
     for ch, mac_input in bt_mac_inputs.items():
         idx = ch - 1 if ch <= 6 else ch - 7
         if idx < len(config.bluetooth.device_addresses): config.bluetooth.device_addresses[idx] = mac_input.value
@@ -581,6 +712,7 @@ def on_save_advanced_settings():
     measure_manager.set_tolerance(config.measurement.tolerance_upper, config.measurement.tolerance_lower)
     update_channel_disabled_display()
     save_config(config)
+    _sync_slave_channel_enabled()
     ui.notify('進階設定已儲存', type='positive')
 
 def on_apply_settings():
@@ -612,8 +744,11 @@ def on_apply_settings():
                     idx = ch - 7
                 new_addr = config.bluetooth.device_addresses[idx] if 0 <= idx < len(config.bluetooth.device_addresses) else ""
             if device.mac_address != new_addr:
+                old_connected = device.state == ConnectionState.CONNECTED
+                if old_connected:
+                    bt_manager._disconnect_device(device)
                 device.mac_address = new_addr
-                log_message(f"[設定] {get_channel_display_name(ch)} MAC 已更新: {new_addr}")
+                log_message(f"[設定] {get_channel_display_name(ch)} MAC 已更新: {new_addr}" + (" (已斷開舊連線，將自動重連)" if old_connected else ""))
         log_message("[設定] 藍芽參數已更新")
 
     # 4. PLC：更新 IP/Port（不中斷監控，由監控迴圈自動重連）
@@ -632,6 +767,9 @@ def on_apply_settings():
 
     # 6. 時序設定直接生效（量測流程讀取 config.timing.*）
     log_message(f"[設定] 時序參數已更新")
+
+    # 7. Slave 同步通道啟用狀態給 Master
+    _sync_slave_channel_enabled()
 
     log_message("[設定] 所有參數已套用完成")
     ui.notify('設定已即時套用', type='positive')
@@ -663,6 +801,18 @@ def update_plc_display():
         elif s == PLCConnectionState.CONNECTING: plc_status_icon.props('color=yellow')
         else: plc_status_icon.props('color=red')
     for ch in bt_mgr.devices.keys(): update_meter_bt_status(ch, bt_mgr.get_device_state(ch))
+
+    # 檢查 Slave 藍芽 CONNECTING 超時
+    if config.network.mode == "master" and slave_bt_connecting_since:
+        timeout = config.bluetooth.timeout
+        now = time.time()
+        for ch, since in list(slave_bt_connecting_since.items()):
+            if now - since >= timeout and is_channel_enabled(ch):
+                display_name = get_channel_display_name(ch)
+                log_message(f"[警告] {display_name} (Slave) 藍芽連線逾時 ({timeout:.0f}s)!")
+                show_bt_disconnect_alert(ch)
+                slave_bt_connecting_since.pop(ch)  # 只警告一次，等狀態變化再重新追蹤
+
     data = plc_mgr.plc_data
     if not data: return
     if plc_monitor_ui:
@@ -689,7 +839,8 @@ def update_plc_display():
             except: pass
 
 def build_settings_drawer():
-    global settings_drawer, timing_inputs, plc_inputs, bt_inputs, bt_mac_inputs, mode_select, tolerance_upper_input, tolerance_lower_input
+    global settings_drawer, timing_inputs, plc_inputs, bt_inputs, bt_mac_inputs, net_inputs, mode_select, tolerance_upper_input, tolerance_lower_input, empty_upper_input, empty_lower_input
+    is_master = config.network.mode == "master"
     with ui.right_drawer(value=False, fixed=False).props('width=320 bordered').classes('bg-slate-900') as drawer:
         settings_drawer = drawer
         with ui.row().classes('w-full items-center justify-between p-2 bg-slate-800'):
@@ -699,28 +850,44 @@ def build_settings_drawer():
             with ui.column().classes('w-full p-3 gap-4'):
                 with ui.expansion('系統設定', icon='settings').classes('w-full bg-slate-800').props('default-opened'):
                     with ui.column().classes('w-full gap-2 p-2'):
-                        with ui.row().classes('items-center'):
-                            ui.label('誤差上限:').classes('text-gray-300 w-28')
-                            tolerance_upper_input = ui.number(value=config.measurement.tolerance_upper, format='%.2f', step=0.01).props('outlined dense suffix=°C').classes('w-24')
-                        with ui.row().classes('items-center'):
-                            ui.label('誤差下限:').classes('text-gray-300 w-28')
-                            tolerance_lower_input = ui.number(value=config.measurement.tolerance_lower, format='%.2f', step=0.01).props('outlined dense suffix=°C').classes('w-24')
+                        if is_master:
+                            with ui.row().classes('items-center'):
+                                ui.label('誤差上限:').classes('text-gray-300 w-28')
+                                tolerance_upper_input = ui.number(value=config.measurement.tolerance_upper, format='%.2f', step=0.01).props('outlined dense suffix=°C').classes('w-24')
+                            with ui.row().classes('items-center'):
+                                ui.label('誤差下限:').classes('text-gray-300 w-28')
+                                tolerance_lower_input = ui.number(value=config.measurement.tolerance_lower, format='%.2f', step=0.01).props('outlined dense suffix=°C').classes('w-24')
+                            with ui.row().classes('items-center'):
+                                ui.label('空槍上限:').classes('text-gray-300 w-28')
+                                empty_upper_input = ui.number(value=config.measurement.empty_upper, format='%.2f', step=0.1).props('outlined dense suffix=°C').classes('w-24')
+                            with ui.row().classes('items-center'):
+                                ui.label('空槍下限:').classes('text-gray-300 w-28')
+                                empty_lower_input = ui.number(value=config.measurement.empty_lower, format='%.2f', step=0.1).props('outlined dense suffix=°C').classes('w-24')
                         ui.label('運行模式:').classes('text-gray-300 w-28')
                         mode_select = ui.select(options=['master', 'slave'], value=config.network.mode).props('outlined dense').classes('w-32')
-                with ui.expansion('時序設定', icon='timer').classes('w-full bg-slate-800'):
-                    with ui.column().classes('w-full gap-2 p-2'):
-                        for k, v in [('empty_collect_delay', '空槍收集延遲'), ('measure_collect_delay', '量測收集延遲'), ('bt_request_interval', '藍芽請求間隔'), ('plc_poll_interval', 'PLC 輪詢間隔'), ('result_hold_time', '結果保持時間')]:
-                            with ui.row().classes('items-center'):
-                                ui.label(v + ':').classes('text-gray-300 w-28')
-                                timing_inputs[k] = ui.number(value=getattr(config.timing, k), format='%.2f').props('outlined dense suffix=秒').classes('w-24')
-                with ui.expansion('PLC 設定', icon='memory').classes('w-full bg-slate-800'):
+                with ui.expansion('網路設定', icon='lan').classes('w-full bg-slate-800'):
                     with ui.column().classes('w-full gap-2 p-2'):
                         with ui.row().classes('items-center'):
-                            ui.label('IP 位址:').classes('text-gray-300 w-28')
-                            plc_inputs['ip_address'] = ui.input(value=config.plc.ip_address).props('outlined dense').classes('w-36')
+                            ui.label('Master IP:').classes('text-gray-300 w-28')
+                            net_inputs['master_ip'] = ui.input(value=config.network.master_ip).props('outlined dense').classes('w-36')
                         with ui.row().classes('items-center'):
                             ui.label('Port:').classes('text-gray-300 w-28')
-                            plc_inputs['port'] = ui.number(value=config.plc.port).props('outlined dense').classes('w-24')
+                            net_inputs['port'] = ui.number(value=config.network.port).props('outlined dense').classes('w-24')
+                if is_master:
+                    with ui.expansion('時序設定', icon='timer').classes('w-full bg-slate-800'):
+                        with ui.column().classes('w-full gap-2 p-2'):
+                            for k, v in [('empty_collect_delay', '空槍收集延遲'), ('measure_collect_delay', '量測收集延遲')]:
+                                with ui.row().classes('items-center'):
+                                    ui.label(v + ':').classes('text-gray-300 w-28')
+                                    timing_inputs[k] = ui.number(value=getattr(config.timing, k), format='%.2f').props('outlined dense suffix=秒').classes('w-24')
+                    with ui.expansion('PLC 設定', icon='memory').classes('w-full bg-slate-800'):
+                        with ui.column().classes('w-full gap-2 p-2'):
+                            with ui.row().classes('items-center'):
+                                ui.label('IP 位址:').classes('text-gray-300 w-28')
+                                plc_inputs['ip_address'] = ui.input(value=config.plc.ip_address).props('outlined dense').classes('w-36')
+                            with ui.row().classes('items-center'):
+                                ui.label('Port:').classes('text-gray-300 w-28')
+                                plc_inputs['port'] = ui.number(value=config.plc.port).props('outlined dense').classes('w-24')
                 with ui.expansion('藍芽設定', icon='bluetooth').classes('w-full bg-slate-800'):
                     with ui.column().classes('w-full gap-2 p-2'):
                         mac_channels = range(1, 7) if config.network.mode == "master" else range(7, 13)
@@ -732,13 +899,14 @@ def build_settings_drawer():
                                 bt_mac_inputs[ch] = ui.input(value=addr, placeholder='XX:XX:XX:XX:XX:XX').props('outlined dense').classes('flex-grow')
                         with ui.row().classes('items-center'):
                             ui.label('重連間隔:').classes('text-gray-300 w-28')
-                            bt_inputs['reconnect_interval'] = ui.number(value=config.bluetooth.reconnect_interval).props('outlined dense').classes('w-24')
+                            bt_inputs['reconnect_interval'] = ui.number(value=config.bluetooth.reconnect_interval).props('outlined dense suffix=秒').classes('w-24')
                         with ui.row().classes('items-center'):
                             ui.label('超時:').classes('text-gray-300 w-28')
-                            bt_inputs['timeout'] = ui.number(value=config.bluetooth.timeout).props('outlined dense').classes('w-24')
+                            bt_inputs['timeout'] = ui.number(value=config.bluetooth.timeout).props('outlined dense suffix=秒').classes('w-24')
                 with ui.expansion('通道啟用', icon='toggle_on').classes('w-full bg-slate-800'):
+                    ch_range = range(1, 13) if is_master else range(7, 13)
                     with ui.grid(columns=6).classes('w-full gap-1'):
-                        for i in range(1, 13):
+                        for i in ch_range:
                             with ui.column().classes('items-center'):
                                 ui.label(get_channel_display_name(i)).classes('text-gray-300 text-[10px]')
                                 channel_switches[i] = ui.switch(value=config.measurement.channel_enabled[i-1]).props('dense')
@@ -795,8 +963,10 @@ def build_ui():
                     ui.badge('MASTER' if is_master else 'SLAVE', color='blue' if is_master else 'orange').classes('text-lg px-3 py-1')
                     
                     # 顯示目前批次
-                    current_batch_label = ui.label('目前批次: --').classes('text-blue-300 text-lg font-mono ml-4')
-                    ui.button('換批', on_click=on_new_batch_click).props('color=blue icon=fiber_new outline').classes('ml-2')
+                    if is_master:
+                        batch_text = f'目前批次: {config.current_batch}' if config.current_batch else '目前批次: --'
+                        current_batch_label = ui.label(batch_text).classes('text-blue-300 text-lg font-mono ml-4')
+                        ui.button('換批', on_click=on_new_batch_click).props('color=blue icon=fiber_new outline').classes('ml-2')
 
                     if is_master:
                         ui.label('|').classes('text-gray-600 text-2xl mx-2')
@@ -811,8 +981,9 @@ def build_ui():
                         color = 'text-green-400' if system_running else 'text-red-400'
                         system_status_label = ui.label(text).classes(f'{color} text-2xl font-bold')
                 with ui.row().classes('items-center gap-6'):
-                    with ui.row().classes('items-center gap-2'):
-                        ui.label('PLC:').classes('text-gray-300 text-xl'); plc_status_icon = ui.icon('circle', color='gray').classes('text-2xl')
+                    if is_master:
+                        with ui.row().classes('items-center gap-2'):
+                            ui.label('PLC:').classes('text-gray-300 text-xl'); plc_status_icon = ui.icon('circle', color='gray').classes('text-2xl')
                     with ui.row().classes('items-center gap-2'):
                         ui.label('網路:').classes('text-gray-300 text-xl'); network_status_icon = ui.icon('circle', color='gray').classes('text-2xl')
                     ui.button(icon='settings', on_click=toggle_settings).props('flat round color=white size=lg')
@@ -833,6 +1004,10 @@ def build_ui():
                     with ui.row().classes('items-center gap-4'):
                         ui.label('上限:').classes('text-gray-400 text-base'); ui.label(f'+{config.measurement.tolerance_upper:.2f}°C').classes('text-green-400 text-xl font-bold')
                         ui.label('下限:').classes('text-gray-400 text-base'); ui.label(f'-{config.measurement.tolerance_lower:.2f}°C').classes('text-red-400 text-xl font-bold')
+                    if is_master:
+                        with ui.row().classes('items-center gap-4 mt-1'):
+                            ui.label('空槍上限:').classes('text-gray-400 text-base'); ui.label(f'{config.measurement.empty_upper:.1f}°C').classes('text-orange-400 text-xl font-bold')
+                            ui.label('空槍下限:').classes('text-gray-400 text-base'); ui.label(f'{config.measurement.empty_lower:.1f}°C').classes('text-cyan-400 text-xl font-bold')
                 with ui.card().classes('w-full bg-slate-800 p-3'):
                     with ui.row().classes('w-full items-center justify-between mb-2'):
                         ui.label('量測流程').classes('text-lg text-white font-bold')
@@ -850,13 +1025,13 @@ def build_ui():
                             state_text = state_map.get(measure_manager.state, "待機中")
                         measure_status_label = ui.label(state_text).classes('text-gray-400 text-xl font-bold')
                     with ui.row().classes('w-full gap-2'):
-                        ui.button('重設資料', on_click=on_reset_click).props('color=grey icon=refresh size=lg').classes('flex-grow text-lg')
                         ui.button('清空Log', on_click=lambda: log_console.clear()).props('color=grey icon=delete size=lg').classes('text-lg')
-                with ui.card().classes('w-full bg-slate-700 p-3'):
-                    ui.label('手動觸發').classes('text-lg text-yellow-400 font-bold mb-2')
-                    with ui.row().classes('gap-2'):
-                        ui.button('空槍量測', on_click=on_simulate_empty).props('color=cyan icon=science size=lg')
-                        ui.button('溫度量測', on_click=on_simulate_measure).props('color=orange icon=thermostat size=lg')
+                if is_master:
+                    with ui.card().classes('w-full bg-slate-700 p-3'):
+                        ui.label('手動觸發').classes('text-lg text-yellow-400 font-bold mb-2')
+                        with ui.row().classes('gap-2'):
+                            ui.button('空槍量測', on_click=on_simulate_empty).props('color=cyan icon=science size=lg')
+                            ui.button('溫度量測', on_click=on_simulate_measure).props('color=orange icon=thermostat size=lg')
                 if is_master:
                     with ui.card().classes('w-full bg-slate-800 p-3'):
                         ui.label('PLC 監控').classes('text-lg text-purple-300 font-bold mb-2')
@@ -882,6 +1057,10 @@ def main_page():
         if bt_mgr:
             for ch in bt_mgr.devices.keys(): update_meter_bt_status(ch, bt_mgr.get_device_state(ch))
     ui.timer(1.5, sync, once=True)
+    def sync_network():
+        if net_manager and network_status_icon:
+            on_network_state(net_manager.state)
+    ui.timer(2.0, sync_network, once=True)
 
 if __name__ in {"__main__", "__mp_main__"}:
     if multiprocessing.current_process().name == 'MainProcess':
@@ -904,7 +1083,9 @@ if __name__ in {"__main__", "__mp_main__"}:
         finally:
             import os; os._exit(0)
 
+    app.native.window_args['confirm_close'] = True
     app.on_shutdown(handle_shutdown)
+    # 注意: pywebview 的 icon 參數僅支援 GTK/QT，Windows (EdgeChromium) 不支援
     # Master 用 port 8080, Slave 用 port 8081，同一台電腦可同時跑兩個實例
     ui_port = 8080 if config.network.mode == "master" else 8081
     ui.run(title=config.title, dark=True, native=True, port=ui_port, window_size=(config.window_width, config.window_height), favicon='meter32x32.ico', reload=False, show=False)

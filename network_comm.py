@@ -61,6 +61,7 @@ class NetworkManager:
         self._on_data_received: Optional[Callable[[MeterDataPacket], None]] = None
         self._on_state_callback: Optional[Callable[[NetworkState], None]] = None
         self._on_command_callback: Optional[Callable[[str], None]] = None
+        self._on_channel_enabled_callback: Optional[Callable[[Dict[int, bool]], None]] = None
 
         # 接收緩衝
         self._received_data: Dict[int, MeterDataPacket] = {}
@@ -68,11 +69,14 @@ class NetworkManager:
     def set_callbacks(self,
                       on_data: Optional[Callable[[MeterDataPacket], None]] = None,
                       on_state: Optional[Callable[[NetworkState], None]] = None,
-                      on_command: Optional[Callable[[str], None]] = None):
+                      on_command: Optional[Callable[[str], None]] = None,
+                      on_channel_enabled: Optional[Callable[[Dict[int, bool]], None]] = None):
         """設定回呼函式"""
         self._on_data_received = on_data
         self._on_state_callback = on_state
         self._on_command_callback = on_command
+        if on_channel_enabled is not None:
+            self._on_channel_enabled_callback = on_channel_enabled
 
     @property
     def state(self) -> NetworkState:
@@ -119,6 +123,20 @@ class NetworkManager:
         except Exception as e:
             print(f"傳送資料失敗: {e}")
             self._update_state(NetworkState.ERROR)
+            return False
+
+    def send_channel_enabled(self, channel_enabled: Dict[int, bool]) -> bool:
+        """傳送通道啟用狀態 (Slave 用)"""
+        if self.role != NetworkRole.SLAVE:
+            return False
+        if self._state != NetworkState.CONNECTED:
+            return False
+        try:
+            data = json.dumps({"type": "channel_enabled", "channels": {str(k): v for k, v in channel_enabled.items()}}) + "\n"
+            self._client_socket.send(data.encode('utf-8'))
+            return True
+        except Exception as e:
+            print(f"傳送通道狀態失敗: {e}")
             return False
 
     def send_command(self, command: str) -> bool:
@@ -243,11 +261,7 @@ class NetworkManager:
                 while "\n" in buffer:
                     line, buffer = buffer.split("\n", 1)
                     if line.strip():
-                        packet = MeterDataPacket.from_json(line)
-                        if packet:
-                            self._received_data[packet.channel] = packet
-                            if self._on_data_received:
-                                self._on_data_received(packet)
+                        self._handle_master_received(line.strip())
 
             except socket.timeout:
                 continue
@@ -256,6 +270,24 @@ class NetworkManager:
                 break
 
         self._update_state(NetworkState.LISTENING)
+
+    def _handle_master_received(self, line: str):
+        """Master 端處理收到的資料（資料封包或通道狀態）"""
+        try:
+            d = json.loads(line)
+            if d.get("type") == "channel_enabled":
+                channels = {int(k): v for k, v in d.get("channels", {}).items()}
+                if self._on_channel_enabled_callback:
+                    self._on_channel_enabled_callback(channels)
+                return
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        packet = MeterDataPacket.from_json(line)
+        if packet:
+            self._received_data[packet.channel] = packet
+            if self._on_data_received:
+                self._on_data_received(packet)
 
     def _update_state(self, state: NetworkState):
         """更新連線狀態"""
