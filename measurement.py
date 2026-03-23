@@ -18,6 +18,11 @@ class MeasurementState(Enum):
     MEASURING = "measuring"          # 量測中
     COMPLETE = "complete"            # 完成
 
+class JudgeMode(Enum):
+    NORMAL = "normal"        # 正常判定
+    FORCE_OK = "force_ok"    # 強制全部 OK
+    FORCE_NG = "force_ng"    # 強制全部 NG
+
 class JudgeResult(Enum):
     WAIT = "wait"   # 等待
     PASS = "pass"   # 合格
@@ -57,6 +62,7 @@ class MeasurementManager:
         self.enable_logging = enable_logging
 
         self._state = MeasurementState.IDLE
+        self.judge_mode = JudgeMode.NORMAL
         self._channels: Dict[int, ChannelData] = {}
         self._init_channels()
 
@@ -237,9 +243,14 @@ class MeasurementManager:
         )
 
     def _judge(self, error_value: float) -> JudgeResult:
-        """判斷 PASS/FAIL（誤差在 -下限 ~ +上限 範圍內為 PASS）"""
-        lower = -abs(self.tolerance_lower)  # 確保下限為負數
-        upper = abs(self.tolerance_upper)   # 確保上限為正數
+        """判斷 PASS/FAIL（依 judge_mode 決定判定方式）"""
+        if self.judge_mode == JudgeMode.FORCE_OK:
+            return JudgeResult.PASS
+        if self.judge_mode == JudgeMode.FORCE_NG:
+            return JudgeResult.FAIL
+        # 正常判定：誤差在 -下限 ~ +上限 範圍內為 PASS
+        lower = -abs(self.tolerance_lower)
+        upper = abs(self.tolerance_upper)
         if lower <= error_value <= upper:
             return JudgeResult.PASS
         return JudgeResult.FAIL

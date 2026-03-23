@@ -209,35 +209,117 @@ class BluetoothManager:
             conn_thread.start()
             self._threads.append(conn_thread)
 
+    def _warmup_bluetooth_stack(self):
+        """暖機：用第一台設備的 MAC 觸發 Windows 藍芽堆疊初始化"""
+        first_mac = None
+        for device in self.devices.values():
+            if device.mac_address:
+                first_mac = device.mac_address
+                break
+        if not first_mac:
+            return
+
+        print("[*] 藍芽堆疊暖機中...")
+        try:
+            sock = socket.socket(
+                socket.AF_BLUETOOTH,
+                socket.SOCK_STREAM,
+                socket.BTPROTO_RFCOMM
+            )
+            sock.settimeout(3.0)  # 短 timeout，只是為了觸發堆疊初始化
+            sock.connect((first_mac, 1))
+            # 如果意外連上了就關掉，後面正式流程會再連
+            sock.close()
+            print("[*] 藍芽堆疊暖機完成 (探測連線成功)")
+        except Exception:
+            print("[*] 藍芽堆疊暖機完成 (探測連線失敗，屬正常)")
+        finally:
+            try:
+                sock.close()
+            except:
+                pass
+        # 等待堆疊消化探測連線
+        time.sleep(1.0)
+
     def _connection_manager(self):
         """單一 thread 依序管理所有設備的連線（像手動一台一台開）"""
+        # 首次啟動先暖機，讓 Windows 藍芽堆疊初始化
+        self._warmup_bluetooth_stack()
+
         fail_counts = {ch: 0 for ch in self.devices}
+        next_retry_time = {}  # channel -> 下次可重試的時間
+        is_initial_round = True  # 首輪連線標記
 
         while self._running:
             any_need_connect = False
+
+            # 先檢查是否有停用通道仍在連線中，等待斷線完成再嘗試新連線
+            has_pending_disconnect = False
+            for channel, device in self.devices.items():
+                if self._is_channel_enabled and not self._is_channel_enabled(channel):
+                    if device.state in (ConnectionState.CONNECTED, ConnectionState.CONNECTING):
+                        has_pending_disconnect = True
+                    fail_counts[channel] = 0  # 停用通道重設失敗計數
+            if has_pending_disconnect:
+                time.sleep(1.0)  # 等待 _receive_thread 完成斷線
+                continue
+
+            # 收集需要連線的通道（跳過冷卻中的通道）
+            channels_to_connect = []
+            skipped_channels = []
             for channel, device in self.devices.items():
                 if not self._running:
                     return
-                # 跳過停用的通道
                 if self._is_channel_enabled and not self._is_channel_enabled(channel):
                     continue
-                # 跳過已連線或沒有 MAC 的
                 if device.state == ConnectionState.CONNECTED or not device.mac_address:
                     fail_counts[channel] = 0
+                    next_retry_time.pop(channel, None)
                     continue
+                # 漸進式等待：失敗越多次，等越久才重試
+                if channel in next_retry_time and time.time() < next_retry_time[channel]:
+                    skipped_channels.append(channel)
+                    continue
+                channels_to_connect.append(channel)
 
-                any_need_connect = True
+            any_need_connect = len(channels_to_connect) > 0 or len(skipped_channels) > 0
+
+            for idx, channel in enumerate(channels_to_connect):
+                if not self._running:
+                    return
+                device = self.devices[channel]
+                is_last = (idx == len(channels_to_connect) - 1)
+
+                if is_initial_round:
+                    total = len(channels_to_connect)
+                    print(f"[*] 初始化連線 ({idx+1}/{total}): {self._ch_name(channel)}")
+
                 self._connect_device(device)
 
                 if device.state == ConnectionState.CONNECTED:
                     fail_counts[channel] = 0
-                    print(f"[*] {self._ch_name(channel)} 已連線，繼續下一台...")
+                    next_retry_time.pop(channel, None)
+                    # 最後一台不需要等待堆疊穩定
+                    if not is_last:
+                        print(f"[*] {self._ch_name(channel)} 已連線，等待藍芽堆疊穩定...")
+                        time.sleep(2.0)  # 堆疊穩定等待
+                    else:
+                        print(f"[*] {self._ch_name(channel)} 已連線")
                 else:
                     fail_counts[channel] += 1
                     fc = fail_counts[channel]
                     if fc >= 3:
-                        wait = min(self.reconnect_interval * fc, 30.0)
-                        print(f"[!] {self._ch_name(channel)} 連續失敗 {fc} 次，跳過")
+                        # 漸進式冷卻：3次=15s, 6次=30s, 最多60s
+                        cooldown = min(fc * 5, 60)
+                        next_retry_time[channel] = time.time() + cooldown
+                        print(f"[!] {self._ch_name(channel)} 連續失敗 {fc} 次，{cooldown}秒後重試")
+
+            if is_initial_round and (channels_to_connect or skipped_channels):
+                all_channels = channels_to_connect + skipped_channels
+                connected = sum(1 for ch in all_channels
+                                if self.devices[ch].state == ConnectionState.CONNECTED)
+                print(f"[*] 初始化連線完成: {connected}/{len(all_channels)} 台成功")
+                is_initial_round = False
 
             # 一輪掃完，等待後再掃
             if any_need_connect:
@@ -376,6 +458,14 @@ class BluetoothManager:
         if not device.mac_address:
             self._update_state(device, ConnectionState.DISCONNECTED)
             return
+
+        # 強制關閉舊 socket，確保 Windows 藍芽堆疊釋放連線
+        if device.socket:
+            try:
+                device.socket.close()
+            except:
+                pass
+            device.socket = None
 
         try:
             print(f"[*] 嘗試連線 {self._ch_name(device.channel)} -> {device.mac_address}")

@@ -50,13 +50,18 @@ from config import config, save_config, CHANNEL_DISPLAY_NAMES, get_channel_displ
 from bluetooth_comm import BluetoothManager, ConnectionState, ThermometerData
 from plc_comm import PLCManager, PLCConnectionState
 from network_comm import NetworkManager, NetworkRole, NetworkState, MeterDataPacket
-from measurement import MeasurementManager, MeasurementState, JudgeResult, ChannelData
+from measurement import MeasurementManager, MeasurementState, JudgeResult, JudgeMode, ChannelData
 
 # --- 全域變數 ---
 is_shutting_down = False
 prev_bt_states = {}
 slave_bt_connecting_since = {}  # Slave 通道進入 CONNECTING 的時間戳 {ch: timestamp}
 ear_cover_statuses = {}  # 儲存各通道最新的耳套狀態 (1111/0000)
+no_cover_consecutive = {}  # 各通道連續無套計數 {ch: int}
+temp_anomaly_active = False  # 溫度異常狀態
+no_cover_anomaly_active = False  # 連續無套異常狀態
+empty_out_of_range_count = 0    # 暖槍時空槍超限累計次數
+_pending_bt_sync = set()        # Slave: 待補送藍芽狀態的通道
 managers_initialized = False
 meters_ui = {}          
 log_console = None      
@@ -76,7 +81,10 @@ system_running = False
 slave_channel_enabled = {}  # Slave 回報的通道啟用狀態 {ch: bool}
 
 # --- 設定面板元件 ---
+SETTINGS_PASSWORD = "36274806"  # 進階設定密碼
+settings_logged_in = False
 settings_drawer = None
+protected_sections = []  # 需要密碼保護的 UI 區塊
 timing_inputs = {}
 plc_inputs = {}
 bt_inputs = {}
@@ -88,6 +96,13 @@ tolerance_upper_input = None
 tolerance_lower_input = None
 empty_upper_input = None
 empty_lower_input = None
+temp_anomaly_switch = None
+temp_anomaly_upper_input = None
+temp_anomaly_lower_input = None
+temp_anomaly_fields = None
+no_cover_anomaly_switch = None
+no_cover_anomaly_count_input = None
+no_cover_anomaly_fields = None
 
 # --- 異常警告元件 ---
 alert_container = None
@@ -204,6 +219,8 @@ def on_bluetooth_data(channel: int, data: ThermometerData):
     # 儲存耳套狀態供 Log 使用
     ear_cover_statuses[channel] = data.trans_temp_raw
 
+    # 異常檢測在 collect_measure_values 統一處理 (所有通道資料收齊後)
+
     # Slave 模式即時顯示數值 (依量測狀態決定顯示在空槍值或溫度值)
     if config.network.mode == "slave" and channel in meters_ui:
         meter = meters_ui[channel]
@@ -244,12 +261,14 @@ def on_bluetooth_state(channel: int, state: ConnectionState):
             log_message(f"[警告] {display_name} 藍芽已斷線!")
             show_bt_disconnect_alert(channel)
             if plc_manager: plc_manager.set_bt_error(logical_num, True)
+        elif state == ConnectionState.CONNECTING:
+            if plc_manager: plc_manager.set_bt_error(logical_num, True)
         elif state == ConnectionState.CONNECTED:
             log_message(f"[恢復] {display_name} 藍芽已連線")
             stop_alert_flash()
             if plc_manager: plc_manager.set_bt_error(logical_num, False)
 
-    # Slave 模式：藍芽狀態變更時通知 Master
+    # Slave 模式：藍芽狀態變更時通知 Master (失敗時標記待補送)
     if config.network.mode == "slave" and net_manager:
         import time as _time
         packet = MeterDataPacket(
@@ -257,7 +276,8 @@ def on_bluetooth_state(channel: int, state: ConnectionState):
             temperature=0.0, timestamp=_time.time(),
             bt_state=state.value
         )
-        net_manager.send_data(packet)
+        if not net_manager.send_data(packet):
+            _pending_bt_sync.add(channel)
 
 def log_message(msg: str):
     """執行緒安全的 Log 寫入"""
@@ -273,8 +293,38 @@ def log_message(msg: str):
                 log_console.push(formatted)
     except: pass
 
-def show_alert(message: str):
+def write_alarm_log(message: str, alarm_type: str = "其他"):
+    """寫入歷史異常紀錄 CSV (一天一個檔案)"""
+    try:
+        alarm_dir = r"D:\logs\Alarm"
+        os.makedirs(alarm_dir, exist_ok=True)
+        today = datetime.datetime.now().strftime("%Y%m%d")
+        filepath = os.path.join(alarm_dir, f"alarm_{today}.csv")
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        safe_message = message.replace('"', '""')
+        line = f'{timestamp},{alarm_type},"{safe_message}"\n'
+        # 檔案不存在時寫入 CSV 標頭
+        write_header = not os.path.exists(filepath)
+        try:
+            with open(filepath, "a", encoding="utf-8-sig") as f:
+                if write_header:
+                    f.write("日期時間,異常類型,詳細內容\n")
+                f.write(line)
+        except PermissionError:
+            # 檔案被鎖定（如 Excel 開啟中），寫入備用檔案
+            fallback = os.path.join(alarm_dir, f"alarm_{today}_1.csv")
+            write_header_fb = not os.path.exists(fallback)
+            with open(fallback, "a", encoding="utf-8-sig") as f:
+                if write_header_fb:
+                    f.write("日期時間,異常類型,詳細內容\n")
+                f.write(line)
+            print(f"[!] Alarm CSV 被鎖定，已寫入備用: {os.path.basename(fallback)}")
+    except Exception as e:
+        print(f"[!] 寫入 Alarm Log 失敗: {e}")
+
+def show_alert(message: str, alarm_type: str = "其他"):
     """顯示通用警報"""
+    write_alarm_log(message, alarm_type)
     if is_shutting_down or not alert_container or not alert_message_label: return
     with alert_container.client:
         alert_message_label.set_text(f'⚠ {message}')
@@ -286,18 +336,152 @@ def show_bt_disconnect_alert(channel: int):
     if is_shutting_down or not alert_container or not alert_message_label: return
     display_name = get_channel_display_name(channel)
     current_time = datetime.datetime.now().strftime("%H:%M:%S")
-    show_alert(f'[{current_time}] {display_name} 藍芽斷線!')
+    show_alert(f'[{current_time}] {display_name} 藍芽斷線!', alarm_type="藍芽斷線")
+
+def check_temp_anomaly_all(values: dict):
+    """檢查所有通道溫度異常 (僅 Master)，彙整顯示"""
+    global temp_anomaly_active
+    if config.network.mode != "master":
+        return
+    if not config.measurement.temp_anomaly_enabled:
+        return
+
+    anomaly_list = []
+    for ch, temp in values.items():
+        display_name = get_channel_display_name(ch)
+        if temp > config.measurement.temp_anomaly_upper or temp < config.measurement.temp_anomaly_lower:
+            set_meter_highlight(ch, True)
+            anomaly_list.append(f'{display_name}={temp:.2f}°C')
+        else:
+            set_meter_highlight(ch, False)
+
+    if anomaly_list:
+        if plc_manager:
+            plc_manager.set_d513_bit(12, True)
+        range_txt = f'(範圍: {config.measurement.temp_anomaly_lower}~{config.measurement.temp_anomaly_upper}°C)'
+        log_message(f"[異常] 溫度異常: {', '.join(anomaly_list)} {range_txt}")
+        show_alert(f'量測溫度異常: {", ".join(anomaly_list)} {range_txt}', alarm_type="溫度異常")
+        temp_anomaly_active = True
+    else:
+        if temp_anomaly_active:
+            temp_anomaly_active = False
+            log_message("[恢復] 溫度異常解除")
+            if plc_manager:
+                plc_manager.set_d513_bit(12, False)
+
+def check_no_cover_anomaly_all(covers: dict):
+    """追蹤所有通道連續無套計數 (僅 Master)，彙整顯示"""
+    global no_cover_anomaly_active
+
+    if config.network.mode != "master":
+        return
+
+    # 逐通道更新計數與 UI
+    for ch, trans_temp_raw in covers.items():
+        if trans_temp_raw == "0000":
+            no_cover_consecutive[ch] = no_cover_consecutive.get(ch, 0) + 1
+        else:
+            no_cover_consecutive[ch] = 0
+
+        count = no_cover_consecutive[ch]
+
+        # 更新 UI 顯示計數
+        if ch in meters_ui and meters_ui[ch].get('no_cover_count'):
+            label = meters_ui[ch]['no_cover_count']
+            try:
+                with label.client:
+                    label.set_text(str(count))
+                    if count > 0:
+                        label.classes('text-orange-400', remove='text-gray-400')
+                    else:
+                        label.classes('text-gray-400', remove='text-orange-400')
+            except:
+                pass
+
+    # 只有啟用異常開關時才觸發警報與 D513
+    if not config.measurement.no_cover_anomaly_enabled:
+        return
+
+    threshold = config.measurement.no_cover_anomaly_count
+    anomaly_list = []
+    for ch in covers:
+        count = no_cover_consecutive.get(ch, 0)
+        if count >= threshold:
+            set_meter_highlight(ch, True)
+            display_name = get_channel_display_name(ch)
+            anomaly_list.append(f'{display_name}({count}次)')
+        else:
+            set_meter_highlight(ch, False)
+
+    if anomaly_list:
+        if plc_manager:
+            plc_manager.set_d513_bit(13, True)
+        log_message(f"[異常] 連續無套: {', '.join(anomaly_list)}")
+        show_alert(f'連續無套異常: {", ".join(anomaly_list)}', alarm_type="連續無套")
+        no_cover_anomaly_active = True
+    else:
+        if no_cover_anomaly_active:
+            no_cover_anomaly_active = False
+            log_message("[恢復] 連續無套異常解除")
+            if plc_manager:
+                plc_manager.set_d513_bit(13, False)
+
+prev_plc_state = None
+prev_net_state = None
 
 def on_plc_state(state: PLCConnectionState):
+    global prev_plc_state
     if plc_status_icon:
         with plc_status_icon.client:
             if state == PLCConnectionState.CONNECTED: plc_status_icon.props('color=green')
             elif state == PLCConnectionState.CONNECTING: plc_status_icon.props('color=yellow')
             else: plc_status_icon.props('color=red')
 
+    if state != prev_plc_state:
+        old = prev_plc_state
+        prev_plc_state = state
+        if state in (PLCConnectionState.DISCONNECTED, PLCConnectionState.ERROR):
+            log_message(f"[警告] PLC 連線異常 ({state.value})")
+            show_alert(f'PLC 連線異常 ({state.value})', alarm_type="PLC異常")
+        elif state == PLCConnectionState.CONNECTED and old is not None:
+            log_message("[恢復] PLC 連線已恢復")
+
 def on_plc_reset():
+    global temp_anomaly_active, no_cover_anomaly_active, empty_out_of_range_count
     log_message("[PLC] HMI 異常復歸觸發")
-    on_reset_click()
+
+    # D513 整個清為 0 (通知 PLC 解除所有異常)
+    if plc_manager:
+        plc_manager.clear_d513()
+        log_message("[PLC] D513 已清除 (0x0000)")
+
+    # 清除所有異常狀態
+    temp_anomaly_active = False
+    no_cover_anomaly_active = False
+    empty_out_of_range_count = 0
+    no_cover_consecutive.clear()
+
+    # 清除 UI 上無套計數顯示
+    for ch, meter in meters_ui.items():
+        if meter.get('no_cover_count'):
+            try:
+                with meter['no_cover_count'].client:
+                    meter['no_cover_count'].set_text('0')
+                    meter['no_cover_count'].classes('text-gray-400', remove='text-orange-400')
+            except:
+                pass
+
+    # 清除所有通道 highlight
+    for ch in meters_ui:
+        set_meter_highlight(ch, False)
+
+    # 清除 UI 警報 (不含 PLC/網路異常，由 stop_alert_flash 隱藏橫幅)
+    stop_alert_flash()
+    log_message("[PLC] 異常狀態已全部清除")
+
+def on_reset_button_click():
+    """HMI 異常復歸按鈕 — 直接執行復歸邏輯"""
+    on_plc_reset()
 
 def on_plc_empty_trigger():
     log_message("[PLC] 空槍量測觸發")
@@ -311,13 +495,48 @@ def on_plc_empty_trigger():
         log_message(f"[錯誤] 無法啟動空槍量測: {e}")
         # 不清除 D515，因為未寫入空槍值至 Log (D515=0 代表空槍值已寫入)
 
+def _wait_for_slave_data(ts_before: dict, timeout: float = 3.0):
+    """等待 Slave 所有啟用通道的資料都更新（timestamp 比請求前更新）"""
+    # 找出需要等待的 Slave 通道 (CH7~12)
+    expected_channels = set()
+    for ch in range(7, 13):
+        if is_channel_enabled(ch):
+            expected_channels.add(ch)
+    if not expected_channels:
+        return
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        received = net_manager.get_all_received_data()
+        all_ready = True
+        for ch in expected_channels:
+            pkt = received.get(ch)
+            if not pkt or pkt.timestamp <= ts_before.get(ch, 0):
+                all_ready = False
+                break
+        if all_ready:
+            return
+        time.sleep(0.1)
+    # timeout：記錄未到的通道
+    received = net_manager.get_all_received_data()
+    missing = [get_channel_display_name(ch) for ch in expected_channels
+               if ch not in received or received[ch].timestamp <= ts_before.get(ch, 0)]
+    if missing:
+        log_message(f"[警告] 等待 Slave 資料逾時，未收到: {', '.join(missing)}")
+
 def trigger_empty_ack_and_collect():
-    # 通知 Slave 請求量測
+    # 記錄請求前 Slave 資料的時間戳
+    slave_ts_before = {}
     if config.network.mode == "master" and net_manager:
+        for ch, pkt in net_manager.get_all_received_data().items():
+            slave_ts_before[ch] = pkt.timestamp
         net_manager.send_command("request_empty")
+    # 本地藍芽量測
     for channel in bt_manager.devices.keys():
         if is_channel_enabled(channel): bt_manager.request_measurement(channel)
-    # 背景延遲
+    # 等待 Slave 資料到齊（最多 3 秒），本地 BT 回應通常更快
+    if config.network.mode == "master" and net_manager:
+        _wait_for_slave_data(slave_ts_before, timeout=3.0)
     time.sleep(0.2)
     collect_empty_values()
 
@@ -334,12 +553,18 @@ def on_plc_measure_trigger():
         # 不清除 D500，因為未寫入檢測結果 (D500=0 代表結果已寫入)
 
 def trigger_measure_ack_and_collect():
-    # 通知 Slave 請求量測
+    # 記錄請求前 Slave 資料的時間戳
+    slave_ts_before = {}
     if config.network.mode == "master" and net_manager:
+        for ch, pkt in net_manager.get_all_received_data().items():
+            slave_ts_before[ch] = pkt.timestamp
         net_manager.send_command("request_measure")
+    # 本地藍芽量測
     for channel in bt_manager.devices.keys():
         if is_channel_enabled(channel): bt_manager.request_measurement(channel)
-    # 背景延遲
+    # 等待 Slave 資料到齊
+    if config.network.mode == "master" and net_manager:
+        _wait_for_slave_data(slave_ts_before, timeout=3.0)
     time.sleep(0.2)
     collect_measure_values()
 def on_network_data(packet: MeterDataPacket):
@@ -383,6 +608,7 @@ def on_network_data(packet: MeterDataPacket):
     if packet.ear_cover:
         ear_cover_statuses[ch] = packet.ear_cover
         update_meter_ear_cover(ch, packet.ear_cover)
+    # 異常檢測在 collect_measure_values 統一處理
 
     # 溫度為 0 且無耳套資訊 = 純 BT 狀態封包，不 log 溫度
     if packet.temperature == 0.0 and not packet.ear_cover:
@@ -392,11 +618,30 @@ def on_network_data(packet: MeterDataPacket):
         log_message(f"[NET] {display_name}: {packet.temperature}°C {ear_txt}")
 
 def on_network_state(state: NetworkState):
+    global prev_net_state
     if network_status_icon:
         with network_status_icon.client:
             if state == NetworkState.CONNECTED: network_status_icon.props('color=green')
             elif state == NetworkState.LISTENING: network_status_icon.props('color=yellow')
             else: network_status_icon.props('color=red')
+
+    if state != prev_net_state:
+        old = prev_net_state
+        prev_net_state = state
+        if state in (NetworkState.DISCONNECTED, NetworkState.ERROR):
+            log_message(f"[警告] 網路連線異常 ({state.value})")
+            show_alert(f'網路連線異常 ({state.value})', alarm_type="網路異常")
+        elif state == NetworkState.CONNECTED and old is not None:
+            log_message("[恢復] 網路連線已恢復")
+
+    # Master 模式：連線建立後，延遲請求 Slave 重送藍芽狀態（確保 UI 已就緒）
+    if state == NetworkState.CONNECTED and config.network.mode == "master" and net_manager:
+        def _request_slave_sync():
+            time.sleep(2.0)  # 等待 Master UI 完全載入
+            if net_manager and net_manager.state == NetworkState.CONNECTED:
+                net_manager.send_command("sync_bt_status")
+                log_message("[NET] 已請求 Slave 重送藍芽狀態")
+        threading.Thread(target=_request_slave_sync, daemon=True).start()
 
     # Slave 模式：網路連線建立後，補送所有通道的藍芽狀態給 Master
     if state == NetworkState.CONNECTED and config.network.mode == "slave" and bt_manager and net_manager:
@@ -408,6 +653,7 @@ def on_network_state(state: NetworkState):
                 bt_state=device.state.value
             )
             net_manager.send_data(packet)
+        _pending_bt_sync.clear()
         log_message("[NET] 已補送所有通道藍芽狀態至 Master")
         # 補送通道啟用狀態
         _sync_slave_channel_enabled()
@@ -425,7 +671,7 @@ def on_slave_channel_enabled(channels: dict):
     if mismatch:
         msg = f"[警告] Slave 已停用通道: {', '.join(mismatch)}，但 Master 仍為啟用"
         log_message(msg)
-        show_alert(msg)
+        show_alert(msg, alarm_type="通道不一致")
 
 def _sync_slave_channel_enabled():
     """Slave 端：傳送通道啟用狀態給 Master"""
@@ -450,6 +696,18 @@ def on_network_command(command: str):
             for ch in bt_manager.devices.keys():
                 if is_channel_enabled(ch):
                     bt_manager.request_measurement(ch)
+    elif command == "sync_bt_status":
+        log_message("[NET] 收到 Master 藍芽狀態同步請求")
+        if bt_manager and net_manager:
+            import time as _time
+            for ch, device in bt_manager.devices.items():
+                packet = MeterDataPacket(
+                    channel=ch, meter_id=device.device_id or "",
+                    temperature=0.0, timestamp=_time.time(),
+                    bt_state=device.state.value
+                )
+                net_manager.send_data(packet)
+            _sync_slave_channel_enabled()
     elif command == "request_measure":
         log_message("[NET] 收到 Master 溫度量測請求")
         clear_meter_values(is_empty=False)
@@ -493,14 +751,17 @@ def on_measurement_complete(result):
         )
 
     if plc_manager:
-        logical_results = [False]*12
+        # 0=不使用, 1=FAIL, 2=PASS
+        logical_results = [0]*12
         current_results = measure_manager.get_results()
         for internal_ch in range(1, 13):
             display_name = get_channel_display_name(internal_ch)
             logical_idx = int(display_name.replace('CH', '')) - 1
-            logical_results[logical_idx] = current_results[internal_ch - 1]
+            if is_channel_enabled(internal_ch):
+                logical_results[logical_idx] = 2 if current_results[internal_ch - 1] else 1
+            # 未啟用的通道保持 0 (不使用)
 
-        # 只寫判定結果 (D501~D512)，OK/NG 計數由 PLC 自行處理
+        # 寫判定結果 (D501~D512): 0=不使用, 1=FAIL, 2=PASS
         s1 = plc_manager.write_results(logical_results)
         if s1: plc_manager.write_complete_signal()
         update_plc_display()
@@ -541,16 +802,48 @@ def collect_empty_values():
     if config.network.mode == "master" and net_manager:
         for ch, pkt in net_manager.get_all_received_data().items():
             if is_channel_enabled(ch): values[ch] = pkt.temperature
-    # 檢查空槍值是否超出上下限
+    # 檢查空槍值是否超出上下限 (此函式由 D515=1 觸發流程呼叫，資料已收齊)
+    global empty_out_of_range_count
+    is_warmup = plc_manager and plc_manager.plc_data and plc_manager.plc_data.warmup == 1
+
+    # D542=0 (非暖槍) 時自動歸零暖槍累計次數
+    if not is_warmup and empty_out_of_range_count > 0:
+        empty_out_of_range_count = 0
+        log_message("[暖槍] 暖槍結束，空槍超限累計歸零")
+        if plc_manager: plc_manager.set_d513_bit(14, False)
+
     out_of_range = []
+    out_of_range_chs = []
     for ch, val in values.items():
         if val > config.measurement.empty_upper or val < config.measurement.empty_lower:
             display_name = get_channel_display_name(ch)
             out_of_range.append(f'{display_name}={val:.2f}°C')
+            out_of_range_chs.append(ch)
+            set_meter_highlight(ch, True)
+        else:
+            set_meter_highlight(ch, False)
+
+    range_txt = f'(範圍: {config.measurement.empty_lower:.1f}~{config.measurement.empty_upper:.1f}°C)'
+
     if out_of_range:
-        current_time = datetime.datetime.now().strftime("%H:%M:%S")
-        show_alert(f'[{current_time}] 空槍值異常: {", ".join(out_of_range)} (範圍: {config.measurement.empty_lower:.1f}~{config.measurement.empty_upper:.1f}°C)')
-        log_message(f"[警報] 空槍值超出範圍: {', '.join(out_of_range)}")
+        if is_warmup:
+            # 暖槍中 D542=1：累計超限次數，達 3 次才發出警報
+            empty_out_of_range_count += 1
+            log_message(f"[暖槍] 空槍值超限 第{empty_out_of_range_count}次: {', '.join(out_of_range)}")
+            if empty_out_of_range_count >= 3:
+                show_alert(f'暖槍空槍值連續{empty_out_of_range_count}次超限: {", ".join(out_of_range)} {range_txt}', alarm_type="空槍超限")
+                log_message(f"[警報] 暖槍空槍值連續{empty_out_of_range_count}次超出範圍")
+                if plc_manager: plc_manager.set_d513_bit(14, True)
+        else:
+            # 非暖槍：任一次超限即發出警報
+            show_alert(f'空槍值異常: {", ".join(out_of_range)} {range_txt}', alarm_type="空槍異常")
+            log_message(f"[警報] 空槍值超出範圍: {', '.join(out_of_range)}")
+            if plc_manager: plc_manager.set_d513_bit(14, True)
+    else:
+        # 空槍值正常：重置累計次數與 D513 bit14
+        if empty_out_of_range_count > 0 or (plc_manager and plc_manager._bt_error_mask & (1 << 14)):
+            empty_out_of_range_count = 0
+            if plc_manager: plc_manager.set_d513_bit(14, False)
 
     measure_manager.record_empty_values(values)
 
@@ -579,6 +872,13 @@ def collect_measure_values():
         for ch, pkt in net_manager.get_all_received_data().items():
             if is_channel_enabled(ch): values[ch] = pkt.temperature
     measure_manager.record_measure_values(values)
+
+    # D500=1 量測觸發：統一對所有通道 (含 Slave) 做異常檢測
+    if config.network.mode == "master":
+        check_temp_anomaly_all(values)
+        covers = {ch: ear_cover_statuses[ch] for ch in values if ch in ear_cover_statuses}
+        check_no_cover_anomaly_all(covers)
+
     update_plc_display()
 
 def update_channel_disabled_display():
@@ -647,6 +947,19 @@ def update_meter_ear_cover(channel: int, trans_temp_raw: str):
         if trans_temp_raw == "1111": meter['ear_cover'].set_text("有"); meter['ear_cover'].classes("text-green-400", remove="text-red-400 text-gray-500")
         elif trans_temp_raw == "0000": meter['ear_cover'].set_text("無"); meter['ear_cover'].classes("text-red-400", remove="text-green-400 text-gray-500")
 
+def set_meter_highlight(channel: int, anomaly: bool):
+    """設定通道列 highlight (異常時紅色邊框閃爍)"""
+    if channel not in meters_ui: return
+    meter = meters_ui[channel]
+    try:
+        with meter['row_container'].client:
+            if anomaly:
+                meter['row_container'].classes('bg-red-900/40 border border-red-500 rounded', remove='')
+            else:
+                meter['row_container'].classes(remove='bg-red-900/40 border border-red-500 rounded')
+    except:
+        pass
+
 def start_alert_flash():
     global alert_flash_timer, is_alert_visible
     if alert_flash_timer: alert_flash_timer.deactivate()
@@ -686,6 +999,13 @@ def _collect_settings_from_ui():
     if tolerance_lower_input: config.measurement.tolerance_lower = tolerance_lower_input.value
     if empty_upper_input: config.measurement.empty_upper = empty_upper_input.value
     if empty_lower_input: config.measurement.empty_lower = empty_lower_input.value
+    # 溫度異常設定
+    if temp_anomaly_switch: config.measurement.temp_anomaly_enabled = temp_anomaly_switch.value
+    if temp_anomaly_upper_input: config.measurement.temp_anomaly_upper = temp_anomaly_upper_input.value
+    if temp_anomaly_lower_input: config.measurement.temp_anomaly_lower = temp_anomaly_lower_input.value
+    # 連續無套異常設定
+    if no_cover_anomaly_switch: config.measurement.no_cover_anomaly_enabled = no_cover_anomaly_switch.value
+    if no_cover_anomaly_count_input: config.measurement.no_cover_anomaly_count = int(no_cover_anomaly_count_input.value)
     config.network.mode = mode_select.value
     if config.network.mode == "slave":
         config.plc.enabled = False
@@ -786,6 +1106,20 @@ def update_plc_display():
     """每 500ms 更新 PLC 暫存器、藍芽狀態與系統狀態顯示"""
     objs = globals()
     plc_mgr, bt_mgr = objs.get('plc_manager'), objs.get('bt_manager')
+
+    # Slave: 補送之前失敗的藍芽狀態
+    if _pending_bt_sync and config.network.mode == "slave" and bt_mgr and net_manager:
+        import time as _time
+        for ch in list(_pending_bt_sync):
+            device = bt_mgr.devices.get(ch)
+            if device:
+                packet = MeterDataPacket(
+                    channel=ch, meter_id=device.device_id or "",
+                    temperature=0.0, timestamp=_time.time(),
+                    bt_state=device.state.value
+                )
+                if net_manager.send_data(packet):
+                    _pending_bt_sync.discard(ch)
     
     # 動態更新系統狀態標籤
     if system_status_label:
@@ -827,6 +1161,29 @@ def update_plc_display():
         plc_monitor_ui['bt_error_val'].set_text(f'0x{data.bt_error:04X}')
         plc_monitor_ui['reset_val'].set_text(str(data.reset))
         plc_monitor_ui['reset_ind'].classes('text-green-500' if data.reset else 'text-gray-500', remove='text-green-500 text-gray-500')
+        if 'warmup_val' in plc_monitor_ui:
+            plc_monitor_ui['warmup_val'].set_text(str(data.warmup))
+            plc_monitor_ui['warmup_ind'].classes('text-green-500' if data.warmup else 'text-gray-500', remove='text-green-500 text-gray-500')
+        # 更新頂部暖槍狀態
+        if 'warmup_label' in plc_monitor_ui:
+            if data.warmup:
+                plc_monitor_ui['warmup_label'].set_text('暖槍中')
+                plc_monitor_ui['warmup_label'].classes('text-orange-400', remove='text-gray-400')
+            else:
+                plc_monitor_ui['warmup_label'].set_text('OFF')
+                plc_monitor_ui['warmup_label'].classes('text-gray-400', remove='text-orange-400')
+        # 更新 D501~D512 判定結果
+        for i in range(12):
+            key = f'result_{i}'
+            if key in plc_monitor_ui:
+                val = data.results[i] if i < len(data.results) else 0
+                plc_monitor_ui[key].set_text(str(val))
+                if val == 2:
+                    plc_monitor_ui[key].classes('text-green-400', remove='text-red-400 text-white')
+                elif val == 1:
+                    plc_monitor_ui[key].classes('text-red-400', remove='text-green-400 text-white')
+                else:
+                    plc_monitor_ui[key].classes('text-white', remove='text-green-400 text-red-400')
     for internal_ch in range(1, 13):
         if internal_ch in meters_ui:
             display_name = get_channel_display_name(internal_ch)
@@ -839,8 +1196,63 @@ def update_plc_display():
             except: pass
 
 def build_settings_drawer():
-    global settings_drawer, timing_inputs, plc_inputs, bt_inputs, bt_mac_inputs, net_inputs, mode_select, tolerance_upper_input, tolerance_lower_input, empty_upper_input, empty_lower_input
+    global settings_drawer, timing_inputs, plc_inputs, bt_inputs, bt_mac_inputs, net_inputs, mode_select, tolerance_upper_input, tolerance_lower_input, empty_upper_input, empty_lower_input, settings_logged_in, protected_sections, temp_anomaly_switch, temp_anomaly_upper_input, temp_anomaly_lower_input, temp_anomaly_fields, no_cover_anomaly_switch, no_cover_anomaly_count_input, no_cover_anomaly_fields
     is_master = config.network.mode == "master"
+    protected_sections = []
+
+    def update_protected_visibility():
+        for section in protected_sections:
+            section.set_visibility(settings_logged_in)
+
+    def on_login_click(pwd_input, login_status):
+        global settings_logged_in
+        if pwd_input.value == SETTINGS_PASSWORD:
+            settings_logged_in = True
+            update_protected_visibility()
+            login_status.set_text('已登入')
+            login_status.classes('text-green-400', remove='text-red-400 text-gray-400')
+            log_message("[設定] 管理者已登入")
+        else:
+            login_status.set_text('密碼錯誤')
+            login_status.classes('text-red-400', remove='text-green-400 text-gray-400')
+
+    def on_logout_click(login_status):
+        global settings_logged_in
+        settings_logged_in = False
+        update_protected_visibility()
+        login_status.set_text('未登入')
+        login_status.classes('text-gray-400', remove='text-green-400 text-red-400')
+
+    def on_judge_mode_change(e):
+        mode = e.value
+        if measure_manager:
+            measure_manager.judge_mode = mode
+        mode_map = {JudgeMode.NORMAL: ('正常判定', 'text-green-400'), JudgeMode.FORCE_OK: ('強制OK', 'text-yellow-400'), JudgeMode.FORCE_NG: ('強制NG', 'text-red-400')}
+        label_text, color = mode_map[mode]
+        # 更新頂部 UI 標籤
+        if 'judge_mode_label' in plc_monitor_ui:
+            lbl = plc_monitor_ui['judge_mode_label']
+            lbl.set_text(label_text)
+            lbl.classes(color, remove='text-green-400 text-yellow-400 text-red-400')
+        log_message(f"[設定] 判定模式切換: {label_text}")
+
+    def _toggle_temp_anomaly_fields(enabled):
+        if temp_anomaly_fields:
+            temp_anomaly_fields.set_visibility(enabled)
+        # 關閉時立即重置 D513 bit12
+        if not enabled and plc_manager:
+            plc_manager.set_d513_bit(12, False)
+            globals()['temp_anomaly_active'] = False
+
+    def _toggle_no_cover_anomaly_fields(enabled):
+        if no_cover_anomaly_fields:
+            no_cover_anomaly_fields.set_visibility(enabled)
+        # 關閉時立即重置 D513 bit13
+        if not enabled and plc_manager:
+            plc_manager.set_d513_bit(13, False)
+            globals()['no_cover_anomaly_active'] = False
+            no_cover_consecutive.clear()
+
     with ui.right_drawer(value=False, fixed=False).props('width=320 bordered').classes('bg-slate-900') as drawer:
         settings_drawer = drawer
         with ui.row().classes('w-full items-center justify-between p-2 bg-slate-800'):
@@ -848,46 +1260,94 @@ def build_settings_drawer():
             ui.button(icon='close', on_click=toggle_settings).props('flat dense round color=white')
         with ui.scroll_area().classes('w-full h-full'):
             with ui.column().classes('w-full p-3 gap-4'):
-                with ui.expansion('系統設定', icon='settings').classes('w-full bg-slate-800').props('default-opened'):
-                    with ui.column().classes('w-full gap-2 p-2'):
-                        if is_master:
-                            with ui.row().classes('items-center'):
-                                ui.label('誤差上限:').classes('text-gray-300 w-28')
-                                tolerance_upper_input = ui.number(value=config.measurement.tolerance_upper, format='%.2f', step=0.01).props('outlined dense suffix=°C').classes('w-24')
-                            with ui.row().classes('items-center'):
-                                ui.label('誤差下限:').classes('text-gray-300 w-28')
-                                tolerance_lower_input = ui.number(value=config.measurement.tolerance_lower, format='%.2f', step=0.01).props('outlined dense suffix=°C').classes('w-24')
-                            with ui.row().classes('items-center'):
-                                ui.label('空槍上限:').classes('text-gray-300 w-28')
-                                empty_upper_input = ui.number(value=config.measurement.empty_upper, format='%.2f', step=0.1).props('outlined dense suffix=°C').classes('w-24')
-                            with ui.row().classes('items-center'):
-                                ui.label('空槍下限:').classes('text-gray-300 w-28')
-                                empty_lower_input = ui.number(value=config.measurement.empty_lower, format='%.2f', step=0.1).props('outlined dense suffix=°C').classes('w-24')
-                        ui.label('運行模式:').classes('text-gray-300 w-28')
-                        mode_select = ui.select(options=['master', 'slave'], value=config.network.mode).props('outlined dense').classes('w-32')
-                with ui.expansion('網路設定', icon='lan').classes('w-full bg-slate-800'):
-                    with ui.column().classes('w-full gap-2 p-2'):
-                        with ui.row().classes('items-center'):
-                            ui.label('Master IP:').classes('text-gray-300 w-28')
-                            net_inputs['master_ip'] = ui.input(value=config.network.master_ip).props('outlined dense').classes('w-36')
-                        with ui.row().classes('items-center'):
-                            ui.label('Port:').classes('text-gray-300 w-28')
-                            net_inputs['port'] = ui.number(value=config.network.port).props('outlined dense').classes('w-24')
-                if is_master:
-                    with ui.expansion('時序設定', icon='timer').classes('w-full bg-slate-800'):
+                # --- 密碼登入區 ---
+                with ui.card().classes('w-full bg-slate-700 p-2'):
+                    with ui.row().classes('w-full items-center gap-2'):
+                        ui.icon('lock', size='sm').classes('text-gray-300')
+                        pwd_input = ui.input(placeholder='輸入管理密碼').props('outlined dense type=password').classes('flex-grow')
+                        login_status = ui.label('未登入').classes('text-gray-400 text-sm')
+                    with ui.row().classes('w-full gap-2 mt-1'):
+                        ui.button('登入', on_click=lambda: on_login_click(pwd_input, login_status)).props('color=blue dense size=sm').classes('flex-grow')
+                        ui.button('登出', on_click=lambda: on_logout_click(login_status)).props('color=grey dense size=sm').classes('flex-grow')
+
+                # === 需要密碼的區塊 ===
+                # --- 系統設定 ---
+                with ui.column().classes('w-full gap-4') as sys_section:
+                    protected_sections.append(sys_section)
+                    sys_section.set_visibility(settings_logged_in)
+                    with ui.expansion('系統設定', icon='settings').classes('w-full bg-slate-800').props('default-opened'):
                         with ui.column().classes('w-full gap-2 p-2'):
-                            for k, v in [('empty_collect_delay', '空槍收集延遲'), ('measure_collect_delay', '量測收集延遲')]:
+                            if is_master:
                                 with ui.row().classes('items-center'):
-                                    ui.label(v + ':').classes('text-gray-300 w-28')
-                                    timing_inputs[k] = ui.number(value=getattr(config.timing, k), format='%.2f').props('outlined dense suffix=秒').classes('w-24')
-                    with ui.expansion('PLC 設定', icon='memory').classes('w-full bg-slate-800'):
+                                    ui.label('誤差上限:').classes('text-gray-300 w-28')
+                                    tolerance_upper_input = ui.number(value=config.measurement.tolerance_upper, format='%.2f', step=0.01).props('outlined dense suffix=°C').classes('w-24')
+                                with ui.row().classes('items-center'):
+                                    ui.label('誤差下限:').classes('text-gray-300 w-28')
+                                    tolerance_lower_input = ui.number(value=config.measurement.tolerance_lower, format='%.2f', step=0.01).props('outlined dense suffix=°C').classes('w-24')
+                                with ui.row().classes('items-center'):
+                                    ui.label('空槍上限:').classes('text-gray-300 w-28')
+                                    empty_upper_input = ui.number(value=config.measurement.empty_upper, format='%.2f', step=0.1).props('outlined dense suffix=°C').classes('w-24')
+                                with ui.row().classes('items-center'):
+                                    ui.label('空槍下限:').classes('text-gray-300 w-28')
+                                    empty_lower_input = ui.number(value=config.measurement.empty_lower, format='%.2f', step=0.1).props('outlined dense suffix=°C').classes('w-24')
+                                with ui.row().classes('items-center'):
+                                    ui.label('判定模式:').classes('text-gray-300 w-28')
+                                    ui.toggle({JudgeMode.NORMAL: '正常', JudgeMode.FORCE_OK: '強制OK', JudgeMode.FORCE_NG: '強制NG'}, value=JudgeMode.NORMAL, on_change=on_judge_mode_change).props('dense no-caps')
+                                # --- 溫度異常設定 ---
+                                ui.separator().classes('my-1')
+                                with ui.row().classes('items-center'):
+                                    ui.label('溫度異常:').classes('text-gray-300 w-28')
+                                    temp_anomaly_switch = ui.switch(value=config.measurement.temp_anomaly_enabled, on_change=lambda e: _toggle_temp_anomaly_fields(e.value)).props('dense')
+                                with ui.column().classes('w-full gap-2') as ta_fields:
+                                    temp_anomaly_fields = ta_fields
+                                    ta_fields.set_visibility(config.measurement.temp_anomaly_enabled)
+                                    with ui.row().classes('items-center'):
+                                        ui.label('溫度上限:').classes('text-gray-300 w-28')
+                                        temp_anomaly_upper_input = ui.number(value=config.measurement.temp_anomaly_upper, format='%.1f', step=0.1).props('outlined dense suffix=°C').classes('w-24')
+                                    with ui.row().classes('items-center'):
+                                        ui.label('溫度下限:').classes('text-gray-300 w-28')
+                                        temp_anomaly_lower_input = ui.number(value=config.measurement.temp_anomaly_lower, format='%.1f', step=0.1).props('outlined dense suffix=°C').classes('w-24')
+                                # --- 連續無套異常設定 ---
+                                ui.separator().classes('my-1')
+                                with ui.row().classes('items-center'):
+                                    ui.label('連續無套:').classes('text-gray-300 w-28')
+                                    no_cover_anomaly_switch = ui.switch(value=config.measurement.no_cover_anomaly_enabled, on_change=lambda e: _toggle_no_cover_anomaly_fields(e.value)).props('dense')
+                                with ui.column().classes('w-full gap-2') as nc_fields:
+                                    no_cover_anomaly_fields = nc_fields
+                                    nc_fields.set_visibility(config.measurement.no_cover_anomaly_enabled)
+                                    with ui.row().classes('items-center'):
+                                        ui.label('連續次數:').classes('text-gray-300 w-28')
+                                        no_cover_anomaly_count_input = ui.number(value=config.measurement.no_cover_anomaly_count, format='%d', step=1, min=1).props('outlined dense suffix=次').classes('w-24')
+                            ui.label('運行模式:').classes('text-gray-300 w-28')
+                            mode_select = ui.select(options=['master', 'slave'], value=config.network.mode).props('outlined dense').classes('w-32')
+                    # --- 網路設定 ---
+                    with ui.expansion('網路設定', icon='lan').classes('w-full bg-slate-800'):
                         with ui.column().classes('w-full gap-2 p-2'):
                             with ui.row().classes('items-center'):
-                                ui.label('IP 位址:').classes('text-gray-300 w-28')
-                                plc_inputs['ip_address'] = ui.input(value=config.plc.ip_address).props('outlined dense').classes('w-36')
+                                ui.label('Master IP:').classes('text-gray-300 w-28')
+                                net_inputs['master_ip'] = ui.input(value=config.network.master_ip).props('outlined dense').classes('w-36')
                             with ui.row().classes('items-center'):
                                 ui.label('Port:').classes('text-gray-300 w-28')
-                                plc_inputs['port'] = ui.number(value=config.plc.port).props('outlined dense').classes('w-24')
+                                net_inputs['port'] = ui.number(value=config.network.port).props('outlined dense').classes('w-24')
+                    if is_master:
+                        # --- 時序設定 ---
+                        with ui.expansion('時序設定', icon='timer').classes('w-full bg-slate-800'):
+                            with ui.column().classes('w-full gap-2 p-2'):
+                                for k, v in [('empty_collect_delay', '空槍收集延遲'), ('measure_collect_delay', '量測收集延遲')]:
+                                    with ui.row().classes('items-center'):
+                                        ui.label(v + ':').classes('text-gray-300 w-28')
+                                        timing_inputs[k] = ui.number(value=getattr(config.timing, k), format='%.2f').props('outlined dense suffix=秒').classes('w-24')
+                        # --- PLC 設定 ---
+                        with ui.expansion('PLC 設定', icon='memory').classes('w-full bg-slate-800'):
+                            with ui.column().classes('w-full gap-2 p-2'):
+                                with ui.row().classes('items-center'):
+                                    ui.label('IP 位址:').classes('text-gray-300 w-28')
+                                    plc_inputs['ip_address'] = ui.input(value=config.plc.ip_address).props('outlined dense').classes('w-36')
+                                with ui.row().classes('items-center'):
+                                    ui.label('Port:').classes('text-gray-300 w-28')
+                                    plc_inputs['port'] = ui.number(value=config.plc.port).props('outlined dense').classes('w-24')
+
+                # === 不需要密碼的區塊 ===
                 with ui.expansion('藍芽設定', icon='bluetooth').classes('w-full bg-slate-800'):
                     with ui.column().classes('w-full gap-2 p-2'):
                         mac_channels = range(1, 7) if config.network.mode == "master" else range(7, 13)
@@ -919,7 +1379,7 @@ def build_meter_block(title: str, start_ch: int, end_ch: int, border_color: str 
         ui.label(title).classes(f'text-xl text-{border_color}-300 font-bold mb-2')
         headers = [('CH', 'w-16'), ('BT', 'w-8'), ('耳套', 'w-12'), ('空槍值', 'w-24'), ('量測值', 'w-24'), ('誤差', 'w-24'), ('狀態', 'w-24')]
         if is_master:
-            headers += [('OK', 'w-14'), ('NG', 'w-14')]
+            headers += [('OK', 'w-14'), ('NG', 'w-14'), ('無套', 'w-10')]
         with ui.row().classes('w-full gap-x-2 items-center border-b border-gray-600 pb-1'):
             for label, w in headers:
                 ui.label(label).classes(f'font-bold text-gray-400 text-base {w}')
@@ -941,10 +1401,12 @@ def build_meter_block(title: str, start_ch: int, end_ch: int, border_color: str 
                 if is_master:
                     ok_display = ui.number(value=0, format='%d').props('readonly borderless dense input-class="text-green-400 text-xl font-bold"').classes('w-14')
                     ng_display = ui.number(value=0, format='%d').props('readonly borderless dense input-class="text-red-400 text-xl font-bold"').classes('w-14')
+                    no_cover_count_label = ui.label('0').classes('text-gray-400 text-xl font-bold font-mono w-10 text-center')
                 else:
                     ok_display = None
                     ng_display = None
-            meters_ui[i] = {'row_container': row_container, 'disabled_badge': disabled_badge, 'bt_icon': bt_icon, 'ear_cover': ear_cover_label, 'empty_display': empty_display, 'temp_display': temp_display, 'error_display': error_display, 'light': status_light, 'text': status_text, 'ok_display': ok_display, 'ng_display': ng_display}
+                    no_cover_count_label = None
+            meters_ui[i] = {'row_container': row_container, 'disabled_badge': disabled_badge, 'bt_icon': bt_icon, 'ear_cover': ear_cover_label, 'empty_display': empty_display, 'temp_display': temp_display, 'error_display': error_display, 'light': status_light, 'text': status_text, 'ok_display': ok_display, 'ng_display': ng_display, 'no_cover_count': no_cover_count_label}
 
 def build_ui():
     global meters_ui, log_console, plc_status_icon, network_status_icon, alert_container, alert_message_label, system_status_label, measure_status_label, plc_monitor_ui, current_batch_label
@@ -980,12 +1442,26 @@ def build_ui():
                         text = '運行中' if system_running else '已停止'
                         color = 'text-green-400' if system_running else 'text-red-400'
                         system_status_label = ui.label(text).classes(f'{color} text-2xl font-bold')
+                    if is_master:
+                        ui.label('|').classes('text-gray-600 text-2xl mx-2')
+                        with ui.row().classes('items-center gap-2 bg-slate-800 px-4 py-1 rounded-full border border-gray-700'):
+                            ui.label('判定模式:').classes('text-gray-400 text-lg')
+                            judge_mode_label = ui.label('正常判定').classes('text-green-400 text-2xl font-bold')
+                            plc_monitor_ui['judge_mode_label'] = judge_mode_label
+                        ui.label('|').classes('text-gray-600 text-2xl mx-2')
+                        with ui.row().classes('items-center gap-2 bg-slate-800 px-4 py-1 rounded-full border border-gray-700'):
+                            ui.label('暖槍:').classes('text-gray-400 text-lg')
+                            plc_monitor_ui['warmup_label'] = ui.label('OFF').classes('text-gray-400 text-2xl font-bold')
                 with ui.row().classes('items-center gap-6'):
                     if is_master:
                         with ui.row().classes('items-center gap-2'):
                             ui.label('PLC:').classes('text-gray-300 text-xl'); plc_status_icon = ui.icon('circle', color='gray').classes('text-2xl')
                     with ui.row().classes('items-center gap-2'):
                         ui.label('網路:').classes('text-gray-300 text-xl'); network_status_icon = ui.icon('circle', color='gray').classes('text-2xl')
+                    if is_master:
+                        ui.button('異常復歸', icon='restart_alt', on_click=on_reset_button_click) \
+                            .props('color=amber text-color=black dense size=lg') \
+                            .classes('px-4')
                     ui.button(icon='settings', on_click=toggle_settings).props('flat round color=white size=lg')
         with ui.card().classes('w-full bg-red-600 p-3 border-2 border-red-400') as container:
             alert_container = container; alert_container.set_visibility(False)
@@ -1032,20 +1508,27 @@ def build_ui():
                         with ui.row().classes('gap-2'):
                             ui.button('空槍量測', on_click=on_simulate_empty).props('color=cyan icon=science size=lg')
                             ui.button('溫度量測', on_click=on_simulate_measure).props('color=orange icon=thermostat size=lg')
-                if is_master:
-                    with ui.card().classes('w-full bg-slate-800 p-3'):
-                        ui.label('PLC 監控').classes('text-lg text-purple-300 font-bold mb-2')
-                        with ui.column().classes('w-full gap-1'):
-                            for k, n, d in [('trigger', '量測觸發 D500', True), ('empty', '空槍觸發 D515', True), ('heartbeat', 'PC 心跳 D514', True), ('cycle', '測試週期 D516', False), ('bt_error', 'BT 錯誤 D513', False), ('reset', '異常復歸 D541', True)]:
-                                with ui.row().classes('w-full items-center justify-between'):
-                                    ui.label(n).classes('text-gray-400 text-base')
-                                    with ui.row().classes('items-center gap-2'):
-                                        plc_monitor_ui[k+'_val'] = ui.label('0').classes('text-white text-base font-mono')
-                                        if d: plc_monitor_ui[k+'_ind'] = ui.icon('circle', size='xs').classes('text-gray-500')
-            with ui.column().classes('flex-grow gap-3').style('max-width: 400px; height: 100%'):
-                with ui.card().classes('w-full h-full bg-slate-800 p-3'):
-                    ui.label('系統 Log').classes('text-lg text-blue-300 font-bold mb-2')
-                    log_console = ui.log(max_lines=100).classes('w-full text-base text-gray-300 font-mono').style('height: 600px')
+        with ui.row().classes('w-full items-stretch gap-3'):
+            if is_master:
+                with ui.card().classes('bg-slate-800 p-3').style('min-width: 320px'):
+                    ui.label('PLC 監控').classes('text-lg text-purple-300 font-bold mb-2')
+                    with ui.column().classes('w-full gap-1'):
+                        for k, n, d in [('trigger', '量測觸發 D500', True), ('empty', '空槍觸發 D515', True), ('heartbeat', 'PC 心跳 D514', True), ('cycle', '測試週期 D516', False), ('bt_error', 'BT 錯誤 D513', False), ('reset', '異常復歸 D541', True), ('warmup', '暖槍訊號 D542', True)]:
+                            with ui.row().classes('w-full items-center justify-between'):
+                                ui.label(n).classes('text-gray-400 text-base')
+                                with ui.row().classes('items-center gap-2'):
+                                    plc_monitor_ui[k+'_val'] = ui.label('0').classes('text-white text-base font-mono')
+                                    if d: plc_monitor_ui[k+'_ind'] = ui.icon('circle', size='xs').classes('text-gray-500')
+                    ui.separator().classes('my-2')
+                    ui.label('判定結果 D501~D512').classes('text-sm text-purple-200 font-bold mb-1')
+                    with ui.grid(columns=4).classes('w-full gap-1'):
+                        for i in range(12):
+                            with ui.row().classes('items-center gap-1'):
+                                ui.label(f'CH{i+1}').classes('text-gray-400 text-xs w-8')
+                                plc_monitor_ui[f'result_{i}'] = ui.label('0').classes('text-white text-sm font-mono')
+            with ui.card().classes('bg-slate-800 p-3 flex-grow').style('min-width: 600px'):
+                ui.label('系統 Log').classes('text-lg text-blue-300 font-bold mb-2')
+                log_console = ui.log(max_lines=100).classes('w-full text-base text-gray-300 font-mono').style('height: 100%; min-height: 300px')
 
 @ui.page('/')
 def main_page():
@@ -1076,10 +1559,18 @@ if __name__ in {"__main__", "__mp_main__"}:
         print("系統正在關閉，正在清理資源...")
         try:
             objs = globals()
-            if objs.get('bt_manager'): bt_manager.stop()
-            if objs.get('plc_manager'): plc_manager.stop_monitoring()
+            if objs.get('bt_manager'):
+                bt_manager.stop()
+                # 等待藍芽執行緒結束，確保 socket 真正關閉
+                for t in bt_manager._threads:
+                    t.join(timeout=3)
+                print("[SHUTDOWN] 藍芽連線已全部關閉")
+            if objs.get('plc_manager'):
+                plc_manager.stop_monitoring()
+                print("[SHUTDOWN] PLC 連線已關閉")
             if objs.get('net_manager'): net_manager.stop()
-        except: pass
+        except Exception as e:
+            print(f"[SHUTDOWN] 清理異常: {e}")
         finally:
             import os; os._exit(0)
 

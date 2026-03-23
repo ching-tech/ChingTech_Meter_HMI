@@ -11,7 +11,7 @@ from enum import Enum
 
 # --- D 暫存器常數 ---
 D_BASE = 500        # 起始暫存器
-D_READ_SIZE = 42    # 批次讀取數量 (D500~D541)
+D_READ_SIZE = 43    # 批次讀取數量 (D500~D542)
 
 # 各暫存器偏移 (相對於 D_BASE)
 _OFF_TRIGGER       = 0   # D500: 量測觸發
@@ -26,6 +26,7 @@ _OFF_OK_END        = 28
 _OFF_NG_START      = 29  # D529~D540: 槍 1~12 NG 數
 _OFF_NG_END        = 40
 _OFF_RESET         = 41  # D541: HMI 異常復歸
+_OFF_WARMUP        = 42  # D542: 暖槍訊號
 
 
 class PLCConnectionState(Enum):
@@ -47,6 +48,7 @@ class PLCData:
     ok_counts: List[int] = field(default_factory=lambda: [0] * 12)   # D517~D528
     ng_counts: List[int] = field(default_factory=lambda: [0] * 12)   # D529~D540
     reset: int = 0                                  # D541: HMI 異常復歸
+    warmup: int = 0                                 # D542: 暖槍訊號
 
 
 class PLCManager:
@@ -107,14 +109,11 @@ class PLCManager:
         return self._plc_data
 
     def connect(self) -> bool:
-        """連接 PLC"""
+        """連接 PLC（連線前一定先關閉舊連線）"""
         print(f"[*] 嘗試連線 PLC: {self.ip_address}:{self.port} (模擬模式: {self.simulation_mode})")
-        
-        # 確保舊連線已徹底關閉
-        self.disconnect()
 
-        if self._state == PLCConnectionState.CONNECTED:
-            return True
+        # 強制關閉舊連線，確保 socket 完全釋放
+        self.disconnect()
 
         self._update_state(PLCConnectionState.CONNECTING)
 
@@ -129,29 +128,45 @@ class PLCManager:
             print("[*] 正在建立連線...")
             self._plc = pymcprotocol.Type3E()
             self._plc.connect(self.ip_address, self.port)
-            print("[+] PLC 連線成功！")
+            # 驗證連線：測試讀取一次，確認 PLC 真的能通訊
+            time.sleep(0.3)
+            self._plc.batchread_wordunits(f"D{D_BASE}", 1)
+            print("[+] PLC 連線成功（已驗證讀取）")
             self._update_state(PLCConnectionState.CONNECTED)
             return True
         except Exception as e:
             print(f"[!] PLC 連線失敗: {e}")
+            # 強制清理
+            if self._plc:
+                try:
+                    if hasattr(self._plc, '_sock') and self._plc._sock:
+                        self._plc._sock.close()
+                except:
+                    pass
+            self._plc = None
             self._update_state(PLCConnectionState.ERROR)
             return False
 
     def disconnect(self):
-        """斷開 PLC 並釋放資源"""
+        """斷開 PLC 並釋放資源（強制關閉底層 socket）"""
         if self._plc:
+            # 關閉 pymcprotocol 連線
             try:
-                # 某些版本的 pymcprotocol 可能沒有 close 方法或名稱不同
                 if hasattr(self._plc, 'close'):
                     self._plc.close()
                 elif hasattr(self._plc, 'disconnect'):
                     self._plc.disconnect()
             except:
                 pass
+            # 強制關閉底層 socket（pymcprotocol 可能殘留）
+            try:
+                if hasattr(self._plc, '_sock') and self._plc._sock:
+                    self._plc._sock.close()
+            except:
+                pass
             self._plc = None
-        
-        if self._state == PLCConnectionState.CONNECTED:
-            self._update_state(PLCConnectionState.DISCONNECTED)
+
+        self._update_state(PLCConnectionState.DISCONNECTED)
 
     def start_monitoring(self):
         """啟動觸發訊號監控"""
@@ -165,31 +180,24 @@ class PLCManager:
         self._thread.start()
 
     def stop_monitoring(self):
-        """停止監控"""
+        """停止監控並關閉 PLC 連線"""
         self._running = False
+        # 等待監控 thread 結束，確保不會與 disconnect 衝突
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=3)
         self.disconnect()
+        print("[PLC] 監控已停止，連線已關閉")
 
     # --- 寫入方法 ---
 
-    def write_results(self, results: List[bool]) -> bool:
-        """寫入 12 通道 PASS/FAIL 結果至 D501~D512"""
-        if not self._plc or self._state != PLCConnectionState.CONNECTED:
-            return False
-        
-        # ... (其餘邏輯不變) ...
-
-
-    # --- 寫入方法 ---
-
-    def write_results(self, results: List[bool]) -> bool:
-        """寫入 12 通道 PASS/FAIL 結果至 D501~D512
-        PASS → 0, FAIL → 1 (反轉邏輯)
+    def write_results(self, results: List[int]) -> bool:
+        """寫入 12 通道判定結果至 D501~D512
+        0=不使用, 1=FAIL, 2=PASS
         """
         if self._state != PLCConnectionState.CONNECTED:
             return False
 
-        # 轉換: True(PASS)→0, False(FAIL)→1
-        values = [0 if r else 1 for r in results[:12]]
+        values = list(results[:12])
         # 補足 12 個
         while len(values) < 12:
             values.append(0)
@@ -293,6 +301,48 @@ class PLCManager:
             print(f"寫入藍芽狀態失敗: {e}")
             return False
 
+    def clear_d513(self) -> bool:
+        """將 D513 整個字組清為 0"""
+        self._bt_error_mask = 0
+        if self._state != PLCConnectionState.CONNECTED:
+            return False
+        if self.simulation_mode:
+            print("[模擬] 寫入 D513=0x0000 (全部清除)")
+            return True
+        try:
+            self._plc.batchwrite_wordunits(f"D{D_BASE + _OFF_BT_ERROR}", [0])
+            return True
+        except Exception as e:
+            print(f"清除 D513 失敗: {e}")
+            return False
+
+    def set_d513_bit(self, bit: int, on: bool) -> bool:
+        """設定 D513 任意位元 (bit0~bit15)
+        bit: 位元編號 (0~15), on: True=SET, False=RST
+        """
+        if not (0 <= bit <= 15):
+            return False
+
+        mask = 1 << bit
+        if on:
+            self._bt_error_mask |= mask
+        else:
+            self._bt_error_mask &= ~mask
+
+        if self._state != PLCConnectionState.CONNECTED:
+            return False
+
+        if self.simulation_mode:
+            print(f"[模擬] 寫入 D513=0x{self._bt_error_mask:04X} (bit{bit} {'ON' if on else 'OFF'})")
+            return True
+
+        try:
+            self._plc.batchwrite_wordunits(f"D{D_BASE + _OFF_BT_ERROR}", [self._bt_error_mask])
+            return True
+        except Exception as e:
+            print(f"寫入 D513 失敗: {e}")
+            return False
+
     def write_ok_ng_counts(self, ok_list: List[int], ng_list: List[int]) -> bool:
         """寫入 OK/NG 計數至 D517~D528 (OK) 及 D529~D540 (NG)"""
         if self._state != PLCConnectionState.CONNECTED:
@@ -344,6 +394,7 @@ class PLCManager:
     def _monitor_loop(self):
         """監控迴圈: 每 50ms 批次讀取 D500~D541, 偵測上升緣, 每秒切換心跳"""
         error_count = 0
+        reconnect_count = 0
         while self._running:
             try:
                 data = self._batch_read()
@@ -385,15 +436,20 @@ class PLCManager:
 
             except Exception as e:
                 error_count += 1
-                # 連續失敗 5 次 (約 250ms) 才視為斷線，避免閃爍
+                # 連續失敗 5 次 (約 500ms) 才視為斷線，避免閃爍
                 if error_count >= 5:
-                    if self._state != PLCConnectionState.DISCONNECTED:
-                        print(f"PLC 通訊持續失敗: {e}")
-                        self._update_state(PLCConnectionState.DISCONNECTED)
-                    
+                    reconnect_count += 1
+                    print(f"[PLC] 通訊持續失敗 ({error_count} 次): {e}")
+                    # 先關閉舊連線，再重連
+                    self.disconnect()
                     if self._running:
-                        time.sleep(2)  # 等待後嘗試重連
-                        self.connect()
+                        # 漸進式等待：重連越多次等越久，讓 PLC TCP 堆疊有時間恢復
+                        wait = min(2 + reconnect_count * 3, 30)
+                        print(f"[PLC] {wait}秒後嘗試重新連線（第{reconnect_count}次）...")
+                        time.sleep(wait)
+                        if self.connect():
+                            error_count = 0
+                            reconnect_count = 0
                 else:
                     # 短暫錯誤，稍微等待
                     time.sleep(0.01)
@@ -419,6 +475,7 @@ class PLCManager:
             data.ok_counts = raw[_OFF_OK_START:_OFF_OK_END + 1]
             data.ng_counts = raw[_OFF_NG_START:_OFF_NG_END + 1]
             data.reset = raw[_OFF_RESET]
+            data.warmup = raw[_OFF_WARMUP]
             return data
         except Exception as e:
             print(f"PLC 讀取失敗: {e}")
@@ -462,6 +519,18 @@ class PLCManager:
             return True
         except Exception as e:
             print(f"寫入心跳失敗: {e}")
+            return False
+
+    def clear_reset_signal(self) -> bool:
+        """清除 D541 復歸信號 (寫入 0)"""
+        if self.simulation_mode:
+            print("[模擬] 清除 D541=0")
+            return True
+        try:
+            self._plc.batchwrite_wordunits(f"D{D_BASE + _OFF_RESET}", [0])
+            return True
+        except Exception as e:
+            print(f"清除 D541 失敗: {e}")
             return False
 
     def _update_state(self, state: PLCConnectionState):

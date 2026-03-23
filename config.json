@@ -49,7 +49,12 @@
       false,
       false,
       false
-    ]
+    ],
+    "temp_anomaly_enabled": true,
+    "temp_anomaly_upper": 42.0,
+    "temp_anomaly_lower": 30.0,
+    "no_cover_anomaly_enabled": true,
+    "no_cover_anomaly_count": 5
   },
   "timing": {
     "empty_collect_delay": 3.0,

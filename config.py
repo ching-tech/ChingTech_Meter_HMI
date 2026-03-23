@@ -68,6 +68,13 @@ class MeasurementConfig:
     meter_count: int = 12          # 總通道數
     # 通道啟用狀態 (True=啟用, False=停用)
     channel_enabled: List[bool] = field(default_factory=lambda: [True] * 12)
+    # 溫度異常檢測
+    temp_anomaly_enabled: bool = False   # 溫度異常使用開關
+    temp_anomaly_upper: float = 42.0     # 溫度異常上限 (°C)
+    temp_anomaly_lower: float = 30.0     # 溫度異常下限 (°C)
+    # 連續無套異常檢測
+    no_cover_anomaly_enabled: bool = False  # 連續無套異常使用開關
+    no_cover_anomaly_count: int = 3         # 連續無套觸發次數
 
 @dataclass
 class AppConfig:
@@ -131,6 +138,9 @@ def _dict_to_config(data: dict) -> AppConfig:
         config.network = NetworkConfig(**data['network'])
     if 'measurement' in data:
         meas_data = data['measurement'].copy()
+        # 過濾未知 key，相容舊版 config.json
+        meas_fields = {f.name for f in MeasurementConfig.__dataclass_fields__.values()}
+        meas_data = {k: v for k, v in meas_data.items() if k in meas_fields}
         # 確保 channel_enabled 有 12 個元素
         if 'channel_enabled' in meas_data:
             enabled = meas_data['channel_enabled']
