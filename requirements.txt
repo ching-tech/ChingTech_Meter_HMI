@@ -1,0 +1,20 @@
+# 三橋耳溫槍探頭套檢測系統 - Python 套件相依性
+# Python 3.8+ required
+
+# === 核心套件 (必要) ===
+nicegui>=1.4.0          # Web UI 框架
+
+# === 硬體通訊套件 (選用 - 模擬模式時不需要) ===
+# PyBluez>=0.23          # 藍芽 SPP 通訊 (Windows 需額外安裝 Visual C++ Build Tools)
+# pymcprotocol>=0.4.0    # 三菱 PLC MC Protocol 通訊
+
+# === 安裝說明 ===
+# 基本安裝 (模擬模式):
+#   pip install nicegui
+#
+# 完整安裝 (含硬體通訊):
+#   pip install nicegui pybluez pymcprotocol
+#
+# Windows 安裝 PyBluez 注意事項:
+#   1. 需先安裝 Visual Studio Build Tools
+#   2. 或使用預編譯版本: pip install PyBluez-win10

@@ -1,0 +1,59 @@
+{
+  "version": "2.1.0",
+  "title": "三橋耳溫槍探頭套檢測系統",
+  "window_width": 1200,
+  "window_height": 850,
+  "simulation_mode": false,
+  "log_dir": "logs",
+  "current_batch": "20260224184355.csv",
+  "bluetooth": {
+    "enabled": true,
+    "device_addresses": [
+      "00:06:66:84:0d:87",
+      "",
+      "",
+      "",
+      "",
+      ""
+    ],
+    "reconnect_interval": 5.0,
+    "timeout": 10.0
+  },
+  "plc": {
+    "enabled": true,
+    "ip_address": "127.0.0.1",
+    "port": 5000
+  },
+  "network": {
+    "mode": "master",
+    "master_ip": "127.0.0.1",
+    "port": 5001,
+    "slave_meter_offset": 6
+  },
+  "measurement": {
+    "tolerance_upper": 0.3,
+    "tolerance_lower": 0.5,
+    "meter_count": 12,
+    "channel_enabled": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "timing": {
+    "empty_collect_delay": 3.0,
+    "measure_collect_delay": 3.0,
+    "bt_request_interval": 0.1,
+    "plc_poll_interval": 0.1,
+    "result_hold_time": 1.0
+  }
+}
