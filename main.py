@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-三橋耳溫槍探頭套檢測系統 - 主程式
+擎添耳溫槍探頭套檢測系統 - 主程式
 """
 import sys
 import os
@@ -9,7 +9,7 @@ import ctypes
 import multiprocessing
 
 # 設定 Windows 工作列獨立圖示（不跟 python.exe 共用）
-ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('com.3bridge.meter-hmi')
+ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('com.chingtech.meter-hmi')
 import datetime
 import threading
 import asyncio
@@ -62,6 +62,9 @@ temp_anomaly_active = False  # 溫度異常狀態
 no_cover_anomaly_active = False  # 連續無套異常狀態
 empty_out_of_range_count = 0    # 暖槍時空槍超限累計次數
 _pending_bt_sync = set()        # Slave: 待補送藍芽狀態的通道
+_d500_triggered_at = 0.0        # D500=1 觸發時間戳 (0=未觸發)
+_d515_triggered_at = 0.0        # D515=1 觸發時間戳 (0=未觸發)
+_TRIGGER_TIMEOUT = 15.0         # 觸發信號超時門檻 (秒)
 managers_initialized = False
 meters_ui = {}          
 log_console = None      
@@ -428,9 +431,10 @@ def check_no_cover_anomaly_all(covers: dict):
 
 prev_plc_state = None
 prev_net_state = None
+_plc_initialized = False  # PLC 首次連線後是否已執行初始化
 
 def on_plc_state(state: PLCConnectionState):
-    global prev_plc_state
+    global prev_plc_state, _plc_initialized
     if plc_status_icon:
         with plc_status_icon.client:
             if state == PLCConnectionState.CONNECTED: plc_status_icon.props('color=green')
@@ -445,6 +449,14 @@ def on_plc_state(state: PLCConnectionState):
             show_alert(f'PLC 連線異常 ({state.value})', alarm_type="PLC異常")
         elif state == PLCConnectionState.CONNECTED and old is not None:
             log_message("[恢復] PLC 連線已恢復")
+
+    # PLC 首次連線成功：初始化 D500/D515 歸零，避免殘留觸發信號
+    if state == PLCConnectionState.CONNECTED and not _plc_initialized:
+        _plc_initialized = True
+        if plc_manager:
+            plc_manager.write_complete_signal()   # D500=0
+            plc_manager.clear_empty_trigger()     # D515=0
+            log_message("[PLC] 初始化完成：D500/D515 已歸零")
 
 def on_plc_reset():
     global temp_anomaly_active, no_cover_anomaly_active, empty_out_of_range_count
@@ -484,16 +496,20 @@ def on_reset_button_click():
     on_plc_reset()
 
 def on_plc_empty_trigger():
-    log_message("[PLC] 空槍量測觸發")
+    global _d515_triggered_at
+    _d515_triggered_at = time.time()
+    enabled = get_enabled_channel_list()
+    log_message(f"[PLC] D515=1 空槍量測觸發 (啟用通道: {len(enabled)}個 {[get_channel_display_name(c) for c in enabled]})")
     clear_meter_values(is_empty=True)
     try:
         measure_manager.start_empty_measurement()
         if config.simulation_mode: bt_manager.set_simulation_mode_empty()
-        # 改用 threading.Timer 避開 slot 錯誤
-        threading.Timer(config.timing.empty_collect_delay, trigger_empty_ack_and_collect).start()
+        delay = config.timing.empty_collect_delay
+        log_message(f"[流程] 空槍: {delay}s 後開始收集")
+        threading.Timer(delay, trigger_empty_ack_and_collect).start()
     except Exception as e:
         log_message(f"[錯誤] 無法啟動空槍量測: {e}")
-        # 不清除 D515，因為未寫入空槍值至 Log (D515=0 代表空槍值已寫入)
+        import traceback; traceback.print_exc()
 
 def _wait_for_slave_data(ts_before: dict, timeout: float = 3.0):
     """等待 Slave 所有啟用通道的資料都更新（timestamp 比請求前更新）"""
@@ -525,48 +541,76 @@ def _wait_for_slave_data(ts_before: dict, timeout: float = 3.0):
         log_message(f"[警告] 等待 Slave 資料逾時，未收到: {', '.join(missing)}")
 
 def trigger_empty_ack_and_collect():
-    # 記錄請求前 Slave 資料的時間戳
-    slave_ts_before = {}
-    if config.network.mode == "master" and net_manager:
-        for ch, pkt in net_manager.get_all_received_data().items():
-            slave_ts_before[ch] = pkt.timestamp
-        net_manager.send_command("request_empty")
-    # 本地藍芽量測
-    for channel in bt_manager.devices.keys():
-        if is_channel_enabled(channel): bt_manager.request_measurement(channel)
-    # 等待 Slave 資料到齊（最多 3 秒），本地 BT 回應通常更快
-    if config.network.mode == "master" and net_manager:
-        _wait_for_slave_data(slave_ts_before, timeout=3.0)
-    time.sleep(0.2)
-    collect_empty_values()
+    try:
+        log_message("[流程] 空槍: Timer 觸發，開始發送 BT/Slave 請求")
+        # 記錄請求前 Slave 資料的時間戳
+        slave_ts_before = {}
+        if config.network.mode == "master" and net_manager:
+            for ch, pkt in net_manager.get_all_received_data().items():
+                slave_ts_before[ch] = pkt.timestamp
+            net_manager.send_command("request_empty")
+            log_message("[流程] 空槍: 已發送 Slave request_empty")
+        # 本地藍芽量測
+        bt_requested = []
+        for channel in bt_manager.devices.keys():
+            if is_channel_enabled(channel):
+                bt_manager.request_measurement(channel)
+                bt_requested.append(get_channel_display_name(channel))
+        log_message(f"[流程] 空槍: 已發送 BT CD 指令 → {bt_requested}")
+        # 等待 Slave 資料到齊（最多 3 秒），本地 BT 回應通常更快
+        if config.network.mode == "master" and net_manager:
+            log_message("[流程] 空槍: 等待 Slave 資料...")
+            _wait_for_slave_data(slave_ts_before, timeout=3.0)
+        time.sleep(0.2)
+        log_message("[流程] 空槍: 開始收集空槍值")
+        collect_empty_values()
+    except Exception as e:
+        log_message(f"[錯誤] trigger_empty_ack_and_collect 異常: {e}")
+        import traceback; traceback.print_exc()
 
 def on_plc_measure_trigger():
-    log_message("[PLC] 溫度量測觸發")
+    global _d500_triggered_at
+    _d500_triggered_at = time.time()
+    enabled = get_enabled_channel_list()
+    log_message(f"[PLC] D500=1 溫度量測觸發 (啟用通道: {len(enabled)}個 {[get_channel_display_name(c) for c in enabled]})")
     clear_meter_values(is_empty=False)
     try:
         measure_manager.start_temperature_measurement()
         if config.simulation_mode: bt_manager.set_simulation_mode_measure()
-        # 改用 threading.Timer
-        threading.Timer(config.timing.measure_collect_delay, trigger_measure_ack_and_collect).start()
+        delay = config.timing.measure_collect_delay
+        log_message(f"[流程] 量測: {delay}s 後開始收集")
+        threading.Timer(delay, trigger_measure_ack_and_collect).start()
     except Exception as e:
         log_message(f"[錯誤] 無法執行溫度量測: {e}")
-        # 不清除 D500，因為未寫入檢測結果 (D500=0 代表結果已寫入)
+        import traceback; traceback.print_exc()
 
 def trigger_measure_ack_and_collect():
-    # 記錄請求前 Slave 資料的時間戳
-    slave_ts_before = {}
-    if config.network.mode == "master" and net_manager:
-        for ch, pkt in net_manager.get_all_received_data().items():
-            slave_ts_before[ch] = pkt.timestamp
-        net_manager.send_command("request_measure")
-    # 本地藍芽量測
-    for channel in bt_manager.devices.keys():
-        if is_channel_enabled(channel): bt_manager.request_measurement(channel)
-    # 等待 Slave 資料到齊
-    if config.network.mode == "master" and net_manager:
-        _wait_for_slave_data(slave_ts_before, timeout=3.0)
-    time.sleep(0.2)
-    collect_measure_values()
+    try:
+        log_message("[流程] 量測: Timer 觸發，開始發送 BT/Slave 請求")
+        # 記錄請求前 Slave 資料的時間戳
+        slave_ts_before = {}
+        if config.network.mode == "master" and net_manager:
+            for ch, pkt in net_manager.get_all_received_data().items():
+                slave_ts_before[ch] = pkt.timestamp
+            net_manager.send_command("request_measure")
+            log_message("[流程] 量測: 已發送 Slave request_measure")
+        # 本地藍芽量測
+        bt_requested = []
+        for channel in bt_manager.devices.keys():
+            if is_channel_enabled(channel):
+                bt_manager.request_measurement(channel)
+                bt_requested.append(get_channel_display_name(channel))
+        log_message(f"[流程] 量測: 已發送 BT CD 指令 → {bt_requested}")
+        # 等待 Slave 資料到齊
+        if config.network.mode == "master" and net_manager:
+            log_message("[流程] 量測: 等待 Slave 資料...")
+            _wait_for_slave_data(slave_ts_before, timeout=3.0)
+        time.sleep(0.2)
+        log_message("[流程] 量測: 開始收集量測值")
+        collect_measure_values()
+    except Exception as e:
+        log_message(f"[錯誤] trigger_measure_ack_and_collect 異常: {e}")
+        import traceback; traceback.print_exc()
 def on_network_data(packet: MeterDataPacket):
     display_name = get_channel_display_name(packet.channel)
     ch = packet.channel
@@ -634,13 +678,14 @@ def on_network_state(state: NetworkState):
         elif state == NetworkState.CONNECTED and old is not None:
             log_message("[恢復] 網路連線已恢復")
 
-    # Master 模式：連線建立後，延遲請求 Slave 重送藍芽狀態（確保 UI 已就緒）
+    # Master 模式：連線建立後，延遲請求 Slave 重送藍芽狀態 + 同步通道啟用狀態
     if state == NetworkState.CONNECTED and config.network.mode == "master" and net_manager:
         def _request_slave_sync():
             time.sleep(2.0)  # 等待 Master UI 完全載入
             if net_manager and net_manager.state == NetworkState.CONNECTED:
                 net_manager.send_command("sync_bt_status")
                 log_message("[NET] 已請求 Slave 重送藍芽狀態")
+                _sync_channel_enabled_to_peer()
         threading.Thread(target=_request_slave_sync, daemon=True).start()
 
     # Slave 模式：網路連線建立後，補送所有通道的藍芽狀態給 Master
@@ -659,28 +704,45 @@ def on_network_state(state: NetworkState):
         _sync_slave_channel_enabled()
 
 def on_slave_channel_enabled(channels: dict):
-    """Master 收到 Slave 的通道啟用狀態"""
+    """收到對端的通道啟用狀態 → 套用、存檔、更新 UI"""
     global slave_channel_enabled
-    slave_channel_enabled = channels
-    # 檢查 Master 與 Slave 通道設定是否一致
-    mismatch = []
-    for ch, slave_enabled in channels.items():
-        master_enabled = is_channel_enabled(ch)
-        if master_enabled and not slave_enabled:
-            mismatch.append(get_channel_display_name(ch))
-    if mismatch:
-        msg = f"[警告] Slave 已停用通道: {', '.join(mismatch)}，但 Master 仍為啟用"
-        log_message(msg)
-        show_alert(msg, alarm_type="通道不一致")
+    if config.network.mode == "master":
+        slave_channel_enabled = channels
 
-def _sync_slave_channel_enabled():
-    """Slave 端：傳送通道啟用狀態給 Master"""
-    if config.network.mode != "slave" or not net_manager:
+    changed = []
+    for ch, peer_enabled in channels.items():
+        ch = int(ch)
+        if 1 <= ch <= 12:
+            local_enabled = is_channel_enabled(ch)
+            if local_enabled != peer_enabled:
+                config.measurement.channel_enabled[ch - 1] = peer_enabled
+                changed.append(f"{get_channel_display_name(ch)}={'啟用' if peer_enabled else '停用'}")
+
+    if changed:
+        # 自動存檔
+        save_config(config)
+        log_message(f"[NET] 收到對端通道狀態變更，已套用並存檔: {changed}")
+        # 更新 UI (需在 NiceGUI 執行緒)
+        try:
+            _apply_channel_enabled_to_ui()
+        except Exception as e:
+            log_message(f"[NET] 更新通道 UI 失敗: {e}")
+    else:
+        log_message("[NET] 收到對端通道狀態，無變更")
+
+def _sync_channel_enabled_to_peer():
+    """傳送本機所有通道啟用狀態給對端 (Master↔Slave 雙向同步)"""
+    if not net_manager:
         return
     ch_state = {}
-    for ch in range(7, 13):
+    for ch in range(1, 13):
         ch_state[ch] = is_channel_enabled(ch)
-    net_manager.send_channel_enabled(ch_state)
+    if net_manager.send_channel_enabled(ch_state):
+        log_message(f"[NET] 已同步通道啟用狀態至對端: {[get_channel_display_name(ch) for ch in range(1,13) if not is_channel_enabled(ch)]} 停用")
+
+def _sync_slave_channel_enabled():
+    """Slave 端：傳送通道啟用狀態給 Master (相容舊呼叫)"""
+    _sync_channel_enabled_to_peer()
 
 def on_network_command(command: str):
     """Slave 收到 Master 指令"""
@@ -741,14 +803,22 @@ def on_channel_update(channel: int, data: ChannelData):
 
 def on_measurement_complete(result):
     log_message(f"[量測完成] PASS: {result.pass_count}, FAIL: {result.fail_count}")
-    
+
+    # 列出各通道判定結果
+    ch_results = []
+    for ch_data in sorted(result.channels.values(), key=lambda c: c.channel):
+        if ch_data.empty_value is not None:
+            ch_results.append(f"CH{ch_data.channel}:{ch_data.result.value}(err={ch_data.error_value:.2f})" if ch_data.error_value is not None else f"CH{ch_data.channel}:{ch_data.result.value}")
+    log_message(f"[量測完成] 通道結果: {ch_results}")
+
     # 執行 5 橫列批次 Log 紀錄 (僅 Master)
     if measure_manager and config.network.mode == "master":
-        measure_manager.save_cycle_log(
+        log_saved = measure_manager.save_cycle_log(
             plc_data=plc_manager.plc_data if plc_manager else None,
             ear_covers=ear_cover_statuses,
             enabled_channels=get_enabled_channel_list()
         )
+        log_message(f"[流程] 量測 Log 寫入: {'成功' if log_saved else '失敗'}")
 
     if plc_manager:
         # 0=不使用, 1=FAIL, 2=PASS
@@ -761,10 +831,19 @@ def on_measurement_complete(result):
                 logical_results[logical_idx] = 2 if current_results[internal_ch - 1] else 1
             # 未啟用的通道保持 0 (不使用)
 
+        log_message(f"[流程] 寫入 PLC 判定結果 D501~D512: {logical_results}")
         # 寫判定結果 (D501~D512): 0=不使用, 1=FAIL, 2=PASS
         s1 = plc_manager.write_results(logical_results)
-        if s1: plc_manager.write_complete_signal()
+        log_message(f"[流程] write_results: {'成功' if s1 else '失敗'}")
+        if s1:
+            plc_manager.write_complete_signal()
+            globals()['_d500_triggered_at'] = 0.0
+            log_message("[流程] D500 已歸零 (write_complete_signal 成功)")
+        else:
+            log_message("[錯誤] write_results 失敗，D500 未歸零!")
         update_plc_display()
+    else:
+        log_message("[錯誤] plc_manager 不存在，無法寫入 PLC 結果!")
 
 def on_new_batch_click():
     """點擊『換批』按鈕"""
@@ -794,14 +873,49 @@ def get_enabled_channel_list():
     return [ch for ch in range(1, 13) if is_channel_enabled(ch)]
 
 def collect_empty_values():
+    # 清除停用通道的殘留資料
+    disabled = [get_channel_display_name(ch) for ch in range(1, 13) if not is_channel_enabled(ch)]
+    for ch in range(1, 13):
+        if not is_channel_enabled(ch):
+            measure_manager.clear_channel(ch)
+    if disabled:
+        log_message(f"[流程] 空槍收集: 已清除停用通道 {disabled}")
+
     values = {}
+    # 本機 BT
+    bt_got = []
+    bt_miss = []
     for channel in bt_manager.devices.keys():
         if is_channel_enabled(channel):
             data = bt_manager.get_last_data(channel)
-            if data: values[channel] = data.temperature
+            if data:
+                values[channel] = data.temperature
+                bt_got.append(f"{get_channel_display_name(channel)}={data.temperature:.2f}")
+            else:
+                bt_miss.append(get_channel_display_name(channel))
+    if bt_got:
+        log_message(f"[流程] 空槍收集 BT: {bt_got}")
+    if bt_miss:
+        log_message(f"[警告] 空槍收集 BT 無資料: {bt_miss}")
+
+    # Slave 網路
     if config.network.mode == "master" and net_manager:
-        for ch, pkt in net_manager.get_all_received_data().items():
-            if is_channel_enabled(ch): values[ch] = pkt.temperature
+        net_got = []
+        net_miss = []
+        for ch in range(7, 13):
+            if is_channel_enabled(ch):
+                pkt = net_manager.get_all_received_data().get(ch)
+                if pkt:
+                    values[ch] = pkt.temperature
+                    net_got.append(f"{get_channel_display_name(ch)}={pkt.temperature:.2f}")
+                else:
+                    net_miss.append(get_channel_display_name(ch))
+        if net_got:
+            log_message(f"[流程] 空槍收集 Slave: {net_got}")
+        if net_miss:
+            log_message(f"[警告] 空槍收集 Slave 無資料: {net_miss}")
+
+    log_message(f"[流程] 空槍收集完成: 共 {len(values)} 通道有值")
     # 檢查空槍值是否超出上下限 (此函式由 D515=1 觸發流程呼叫，資料已收齊)
     global empty_out_of_range_count
     is_warmup = plc_manager and plc_manager.plc_data and plc_manager.plc_data.warmup == 1
@@ -860,18 +974,66 @@ def collect_empty_values():
     update_plc_display()
     if plc_manager and log_saved:
         plc_manager.clear_empty_trigger()
+        globals()['_d515_triggered_at'] = 0.0
         log_message("[PLC] 空槍值已寫入 Log，清除 D515")
 
 def collect_measure_values():
+    # 清除停用通道的殘留資料，避免 _all_measure_recorded 永遠等不到停用通道的量測值
+    disabled = [get_channel_display_name(ch) for ch in range(1, 13) if not is_channel_enabled(ch)]
+    for ch in range(1, 13):
+        if not is_channel_enabled(ch):
+            measure_manager.clear_channel(ch)
+    if disabled:
+        log_message(f"[流程] 量測收集: 已清除停用通道 {disabled}")
+
     values = {}
+    # 本機 BT
+    bt_got = []
+    bt_miss = []
     for channel in bt_manager.devices.keys():
         if is_channel_enabled(channel):
             data = bt_manager.get_last_data(channel)
-            if data: values[channel] = data.temperature
+            if data:
+                values[channel] = data.temperature
+                bt_got.append(f"{get_channel_display_name(channel)}={data.temperature:.2f}")
+            else:
+                bt_miss.append(get_channel_display_name(channel))
+    if bt_got:
+        log_message(f"[流程] 量測收集 BT: {bt_got}")
+    if bt_miss:
+        log_message(f"[警告] 量測收集 BT 無資料: {bt_miss}")
+
+    # Slave 網路
     if config.network.mode == "master" and net_manager:
-        for ch, pkt in net_manager.get_all_received_data().items():
-            if is_channel_enabled(ch): values[ch] = pkt.temperature
+        net_got = []
+        net_miss = []
+        for ch in range(7, 13):
+            if is_channel_enabled(ch):
+                pkt = net_manager.get_all_received_data().get(ch)
+                if pkt:
+                    values[ch] = pkt.temperature
+                    net_got.append(f"{get_channel_display_name(ch)}={pkt.temperature:.2f}")
+                else:
+                    net_miss.append(get_channel_display_name(ch))
+        if net_got:
+            log_message(f"[流程] 量測收集 Slave: {net_got}")
+        if net_miss:
+            log_message(f"[警告] 量測收集 Slave 無資料: {net_miss}")
+
+    log_message(f"[流程] 量測收集完成: 共 {len(values)} 通道有值")
     measure_manager.record_measure_values(values)
+
+    # 檢查 _all_measure_recorded 結果
+    all_done = measure_manager._all_measure_recorded()
+    log_message(f"[流程] _all_measure_recorded = {all_done}, 狀態 = {measure_manager.state.value}")
+    if not all_done:
+        # 列出阻塞的通道：有 empty_value 但沒 measure_value
+        blocking = []
+        for ch_data in measure_manager._channels.values():
+            if ch_data.empty_value is not None and ch_data.measure_value is None:
+                blocking.append(f"CH{ch_data.channel}(empty={ch_data.empty_value:.2f})")
+        if blocking:
+            log_message(f"[警告] 阻塞通道(有空槍無量測): {blocking}")
 
     # D500=1 量測觸發：統一對所有通道 (含 Slave) 做異常檢測
     if config.network.mode == "master":
@@ -896,6 +1058,53 @@ def update_channel_disabled_display():
                 except:
                     logical_num = ch
                 plc_manager.set_bt_error(logical_num, False)
+
+def _refresh_ui_from_config():
+    """從 config 刷新所有設定面板 UI 元件的顯示值"""
+    # 量測參數
+    if tolerance_upper_input: tolerance_upper_input.set_value(config.measurement.tolerance_upper)
+    if tolerance_lower_input: tolerance_lower_input.set_value(config.measurement.tolerance_lower)
+    if empty_upper_input: empty_upper_input.set_value(config.measurement.empty_upper)
+    if empty_lower_input: empty_lower_input.set_value(config.measurement.empty_lower)
+    # 溫度異常
+    if temp_anomaly_switch: temp_anomaly_switch.set_value(config.measurement.temp_anomaly_enabled)
+    if temp_anomaly_upper_input: temp_anomaly_upper_input.set_value(config.measurement.temp_anomaly_upper)
+    if temp_anomaly_lower_input: temp_anomaly_lower_input.set_value(config.measurement.temp_anomaly_lower)
+    # 連續無套異常
+    if no_cover_anomaly_switch: no_cover_anomaly_switch.set_value(config.measurement.no_cover_anomaly_enabled)
+    if no_cover_anomaly_count_input: no_cover_anomaly_count_input.set_value(config.measurement.no_cover_anomaly_count)
+    # 網路
+    if mode_select: mode_select.set_value(config.network.mode)
+    if net_inputs.get('master_ip'): net_inputs['master_ip'].set_value(config.network.master_ip)
+    if net_inputs.get('port'): net_inputs['port'].set_value(config.network.port)
+    # 時序
+    if timing_inputs.get('empty_collect_delay'): timing_inputs['empty_collect_delay'].set_value(config.timing.empty_collect_delay)
+    if timing_inputs.get('measure_collect_delay'): timing_inputs['measure_collect_delay'].set_value(config.timing.measure_collect_delay)
+    # PLC
+    if plc_inputs.get('ip_address'): plc_inputs['ip_address'].set_value(config.plc.ip_address)
+    if plc_inputs.get('port'): plc_inputs['port'].set_value(config.plc.port)
+    # 藍芽
+    if bt_inputs.get('reconnect_interval'): bt_inputs['reconnect_interval'].set_value(config.bluetooth.reconnect_interval)
+    if bt_inputs.get('timeout'): bt_inputs['timeout'].set_value(config.bluetooth.timeout)
+    for ch, mac_input in bt_mac_inputs.items():
+        idx = ch - 1 if ch <= 6 else ch - 7
+        if idx < len(config.bluetooth.device_addresses):
+            mac_input.set_value(config.bluetooth.device_addresses[idx])
+    # 通道啟用開關
+    for ch, sw in channel_switches.items():
+        sw.set_value(config.measurement.channel_enabled[ch - 1])
+
+def _apply_channel_enabled_to_ui():
+    """對端通道狀態變更後，同步更新本機 UI (開關 + 通道列外觀)"""
+    # 更新設定頁面的開關
+    for ch, sw in channel_switches.items():
+        try:
+            with sw.client:
+                sw.set_value(config.measurement.channel_enabled[ch - 1])
+        except Exception:
+            pass
+    # 更新通道列外觀 (停用灰化 + badge)
+    update_channel_disabled_display()
 
 def clear_meter_values(is_empty: bool):
     """收到量測訊號時，先將 UI 對應欄位清 0，避免顯示舊數據"""
@@ -1032,7 +1241,8 @@ def on_save_advanced_settings():
     measure_manager.set_tolerance(config.measurement.tolerance_upper, config.measurement.tolerance_lower)
     update_channel_disabled_display()
     save_config(config)
-    _sync_slave_channel_enabled()
+    _sync_channel_enabled_to_peer()
+    _refresh_ui_from_config()
     ui.notify('進階設定已儲存', type='positive')
 
 def on_apply_settings():
@@ -1088,8 +1298,11 @@ def on_apply_settings():
     # 6. 時序設定直接生效（量測流程讀取 config.timing.*）
     log_message(f"[設定] 時序參數已更新")
 
-    # 7. Slave 同步通道啟用狀態給 Master
-    _sync_slave_channel_enabled()
+    # 7. 雙向同步通道啟用狀態
+    _sync_channel_enabled_to_peer()
+
+    # 8. 刷新 UI 顯示值（確保 UI 與 config 一致）
+    _refresh_ui_from_config()
 
     log_message("[設定] 所有參數已套用完成")
     ui.notify('設定已即時套用', type='positive')
@@ -1135,6 +1348,19 @@ def update_plc_display():
         elif s == PLCConnectionState.CONNECTING: plc_status_icon.props('color=yellow')
         else: plc_status_icon.props('color=red')
     for ch in bt_mgr.devices.keys(): update_meter_bt_status(ch, bt_mgr.get_device_state(ch))
+
+    # 檢查 D500/D515 觸發超時（15 秒未歸 0 = 流程卡住）
+    now = time.time()
+    if _d500_triggered_at and now - _d500_triggered_at >= _TRIGGER_TIMEOUT:
+        elapsed = now - _d500_triggered_at
+        globals()['_d500_triggered_at'] = 0.0  # 只警報一次
+        log_message(f"[異常] D500 量測觸發已 {elapsed:.1f} 秒未歸零，流程可能卡住")
+        show_alert(f'D500 量測觸發超過 {_TRIGGER_TIMEOUT:.0f} 秒未完成', alarm_type="流程超時")
+    if _d515_triggered_at and now - _d515_triggered_at >= _TRIGGER_TIMEOUT:
+        elapsed = now - _d515_triggered_at
+        globals()['_d515_triggered_at'] = 0.0
+        log_message(f"[異常] D515 空槍觸發已 {elapsed:.1f} 秒未歸零，流程可能卡住")
+        show_alert(f'D515 空槍觸發超過 {_TRIGGER_TIMEOUT:.0f} 秒未完成', alarm_type="流程超時")
 
     # 檢查 Slave 藍芽 CONNECTING 超時
     if config.network.mode == "master" and slave_bt_connecting_since:
@@ -1336,7 +1562,7 @@ def build_settings_drawer():
                                 for k, v in [('empty_collect_delay', '空槍收集延遲'), ('measure_collect_delay', '量測收集延遲')]:
                                     with ui.row().classes('items-center'):
                                         ui.label(v + ':').classes('text-gray-300 w-28')
-                                        timing_inputs[k] = ui.number(value=getattr(config.timing, k), format='%.2f').props('outlined dense suffix=秒').classes('w-24')
+                                        timing_inputs[k] = ui.number(value=getattr(config.timing, k), format='%.2f', min=0, max=10, step=0.1).props('outlined dense suffix=秒').classes('w-24')
                         # --- PLC 設定 ---
                         with ui.expansion('PLC 設定', icon='memory').classes('w-full bg-slate-800'):
                             with ui.column().classes('w-full gap-2 p-2'):
@@ -1548,7 +1774,7 @@ def main_page():
 if __name__ in {"__main__", "__mp_main__"}:
     if multiprocessing.current_process().name == 'MainProcess':
         try:
-            import ctypes; app_id = '3bridge.meter.hmi.v1'
+            import ctypes; app_id = 'chingtech.meter.hmi.v1'
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
         except: pass
         init_managers()

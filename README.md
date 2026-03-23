@@ -1,4 +1,4 @@
-# 三橋耳溫槍探頭套檢測系統
+# 擎添耳溫槍探頭套檢測系統
 
 ![Version](https://img.shields.io/badge/version-2.0.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
@@ -6,7 +6,7 @@
 
 ## 專案概述
 
-本系統為 **三橋耳溫槍探頭套檢測系統** 的人機介面 (HMI) 應用程式，用於自動化檢測耳溫槍探頭套的溫度量測精度。系統支援 12 通道同時量測，採用 Master-Slave 架構實現雙機協作。
+本系統為 **擎添耳溫槍探頭套檢測系統** 的人機介面 (HMI) 應用程式，用於自動化檢測耳溫槍探頭套的溫度量測精度。系統支援 12 通道同時量測，採用 Master-Slave 架構實現雙機協作。
 
 ## 系統架構
 
@@ -66,7 +66,7 @@
 ## 目錄結構
 
 ```
-3Bridge_Meter_HMI/
+ChingTech_Meter_HMI/
 ├── main.py              # 主程式與 UI 建構
 ├── config.py            # 設定管理模組
 ├── config.json          # 系統設定檔
@@ -203,7 +203,7 @@ python main.py
 
 ## 授權資訊
 
-本專案為三橋公司專屬軟體，未經授權禁止複製或散佈。
+本專案為擎添公司專屬軟體，未經授權禁止複製或散佈。
 
 ## 版本歷程
 

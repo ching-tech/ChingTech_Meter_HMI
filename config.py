@@ -80,7 +80,7 @@ class MeasurementConfig:
 class AppConfig:
     """應用程式設定"""
     version: str = "2.0.0"
-    title: str = "三橋耳溫槍探頭套檢測系統"
+    title: str = "擎添耳溫槍探頭套檢測系統"
     window_width: int = 1920
     window_height: int = 900
     simulation_mode: bool = True  # 模擬模式 (無硬體時使用)

@@ -241,32 +241,67 @@ class BluetoothManager:
         # 等待堆疊消化探測連線
         time.sleep(1.0)
 
+    def _connect_parallel(self, channels: list):
+        """同時對多個通道發起連線，等待全部回應，回傳各通道結果"""
+        results = {}  # channel -> True/False
+
+        def _try_connect(channel):
+            device = self.devices[channel]
+            self._connect_device(device)
+            results[channel] = (device.state == ConnectionState.CONNECTED)
+
+        # 每個通道一個 thread 同時連線
+        threads = []
+        for ch in channels:
+            t = threading.Thread(target=_try_connect, args=(ch,), daemon=True)
+            threads.append(t)
+            t.start()
+
+        # 等待所有連線嘗試完成
+        for t in threads:
+            t.join(timeout=self.connect_timeout + 5)
+
+        return results
+
     def _connection_manager(self):
-        """單一 thread 依序管理所有設備的連線（像手動一台一台開）"""
-        # 首次啟動先暖機，讓 Windows 藍芽堆疊初始化
+        """初始化：所有啟用通道同時連線；之後監控斷線重連"""
+        # 首次啟動先暖機
         self._warmup_bluetooth_stack()
 
+        # --- 初始化：所有啟用通道同時連線 ---
+        enabled_channels = [
+            ch for ch, dev in self.devices.items()
+            if dev.mac_address and (not self._is_channel_enabled or self._is_channel_enabled(ch))
+        ]
+
+        if enabled_channels:
+            names = [self._ch_name(ch) for ch in enabled_channels]
+            print(f"[*] 同時連線 {len(enabled_channels)} 個通道: {', '.join(names)}")
+            results = self._connect_parallel(enabled_channels)
+
+            ok = [self._ch_name(ch) for ch, success in results.items() if success]
+            ng = [self._ch_name(ch) for ch, success in results.items() if not success]
+            print(f"[*] 連線結果 — 成功: {', '.join(ok) if ok else '無'} | 失敗: {', '.join(ng) if ng else '無'}")
+
+        # --- 監控模式：偵測斷線重連 & 通道啟用狀態變更 ---
         fail_counts = {ch: 0 for ch in self.devices}
-        next_retry_time = {}  # channel -> 下次可重試的時間
-        is_initial_round = True  # 首輪連線標記
+        next_retry_time = {}
 
         while self._running:
-            any_need_connect = False
-
-            # 先檢查是否有停用通道仍在連線中，等待斷線完成再嘗試新連線
+            # 檢查停用通道是否仍在連線中
             has_pending_disconnect = False
             for channel, device in self.devices.items():
                 if self._is_channel_enabled and not self._is_channel_enabled(channel):
                     if device.state in (ConnectionState.CONNECTED, ConnectionState.CONNECTING):
                         has_pending_disconnect = True
-                    fail_counts[channel] = 0  # 停用通道重設失敗計數
+                    fail_counts[channel] = 0
+                    next_retry_time.pop(channel, None)
             if has_pending_disconnect:
-                time.sleep(1.0)  # 等待 _receive_thread 完成斷線
+                time.sleep(1.0)
                 continue
 
-            # 收集需要連線的通道（跳過冷卻中的通道）
-            channels_to_connect = []
-            skipped_channels = []
+            # 收集需要重連的通道
+            channels_to_reconnect = []
             for channel, device in self.devices.items():
                 if not self._running:
                     return
@@ -276,56 +311,32 @@ class BluetoothManager:
                     fail_counts[channel] = 0
                     next_retry_time.pop(channel, None)
                     continue
-                # 漸進式等待：失敗越多次，等越久才重試
                 if channel in next_retry_time and time.time() < next_retry_time[channel]:
-                    skipped_channels.append(channel)
                     continue
-                channels_to_connect.append(channel)
+                channels_to_reconnect.append(channel)
 
-            any_need_connect = len(channels_to_connect) > 0 or len(skipped_channels) > 0
+            if channels_to_reconnect:
+                # 斷線重連也用同時連線
+                names = [self._ch_name(ch) for ch in channels_to_reconnect]
+                print(f"[*] 重連 {len(channels_to_reconnect)} 個通道: {', '.join(names)}")
+                results = self._connect_parallel(channels_to_reconnect)
 
-            for idx, channel in enumerate(channels_to_connect):
-                if not self._running:
-                    return
-                device = self.devices[channel]
-                is_last = (idx == len(channels_to_connect) - 1)
-
-                if is_initial_round:
-                    total = len(channels_to_connect)
-                    print(f"[*] 初始化連線 ({idx+1}/{total}): {self._ch_name(channel)}")
-
-                self._connect_device(device)
-
-                if device.state == ConnectionState.CONNECTED:
-                    fail_counts[channel] = 0
-                    next_retry_time.pop(channel, None)
-                    # 最後一台不需要等待堆疊穩定
-                    if not is_last:
-                        print(f"[*] {self._ch_name(channel)} 已連線，等待藍芽堆疊穩定...")
-                        time.sleep(2.0)  # 堆疊穩定等待
+                for ch, success in results.items():
+                    if success:
+                        fail_counts[ch] = 0
+                        next_retry_time.pop(ch, None)
+                        print(f"[*] {self._ch_name(ch)} 已重連")
                     else:
-                        print(f"[*] {self._ch_name(channel)} 已連線")
-                else:
-                    fail_counts[channel] += 1
-                    fc = fail_counts[channel]
-                    if fc >= 3:
-                        # 漸進式冷卻：3次=15s, 6次=30s, 最多60s
-                        cooldown = min(fc * 5, 60)
-                        next_retry_time[channel] = time.time() + cooldown
-                        print(f"[!] {self._ch_name(channel)} 連續失敗 {fc} 次，{cooldown}秒後重試")
+                        fail_counts[ch] += 1
+                        fc = fail_counts[ch]
+                        if fc >= 3:
+                            cooldown = min(fc * 5, 30)
+                            next_retry_time[ch] = time.time() + cooldown
+                            print(f"[!] {self._ch_name(ch)} 連續失敗 {fc} 次，{cooldown}秒後重試")
 
-            if is_initial_round and (channels_to_connect or skipped_channels):
-                all_channels = channels_to_connect + skipped_channels
-                connected = sum(1 for ch in all_channels
-                                if self.devices[ch].state == ConnectionState.CONNECTED)
-                print(f"[*] 初始化連線完成: {connected}/{len(all_channels)} 台成功")
-                is_initial_round = False
-
-            # 一輪掃完，等待後再掃
-            if any_need_connect:
                 time.sleep(self.reconnect_interval)
             else:
-                time.sleep(2.0)  # 全部已連線，低頻檢查斷線
+                time.sleep(2.0)  # 全部已連線，低頻監控
 
     def stop(self):
         """停止藍芽管理器"""

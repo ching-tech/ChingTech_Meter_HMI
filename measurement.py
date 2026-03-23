@@ -107,6 +107,14 @@ class MeasurementManager:
         """取得通道資料"""
         return self._channels.get(channel)
 
+    def clear_channel(self, channel: int):
+        """清除指定通道的量測資料（停用通道時使用，避免殘留資料阻擋流程完成）"""
+        if channel in self._channels:
+            self._channels[channel].empty_value = None
+            self._channels[channel].measure_value = None
+            self._channels[channel].error_value = None
+            self._channels[channel].result = JudgeResult.WAIT
+
     def get_all_channels(self) -> Dict[int, ChannelData]:
         """取得所有通道資料"""
         return self._channels.copy()
@@ -166,6 +174,7 @@ class MeasurementManager:
 
     def record_empty_values(self, values: Dict[int, float]):
         """批次記錄空槍值"""
+        print(f"[measurement] record_empty_values: 收到 {len(values)} 通道空槍值")
         for channel, value in values.items():
             if channel in self._channels:
                 self._channels[channel].empty_value = value
@@ -173,6 +182,7 @@ class MeasurementManager:
                 self._notify_channel_update(channel)
 
         if self._all_empty_recorded():
+            print(f"[measurement] 空槍記錄完成，狀態 {self._state.value} → EMPTY_DONE")
             self._update_state(MeasurementState.EMPTY_DONE)
 
     def start_temperature_measurement(self):
@@ -201,8 +211,10 @@ class MeasurementManager:
 
     def record_measure_values(self, values: Dict[int, float]):
         """批次記錄溫度量測值"""
+        print(f"[measurement] record_measure_values: 收到 {len(values)} 通道值")
         for channel, value in values.items():
             if channel not in self._channels:
+                print(f"[measurement] CH{channel} 不在通道列表中，跳過")
                 continue
 
             ch = self._channels[channel]
@@ -212,11 +224,21 @@ class MeasurementManager:
             if ch.empty_value is not None:
                 ch.error_value = value - ch.empty_value
                 ch.result = self._judge(ch.error_value)
+                print(f"[measurement] CH{channel}: empty={ch.empty_value:.2f}, measure={value:.2f}, error={ch.error_value:.2f}, result={ch.result.value}")
+            else:
+                print(f"[measurement] CH{channel}: 無空槍值，無法計算誤差")
 
             self._notify_channel_update(channel)
 
-        if self._all_measure_recorded():
+        all_done = self._all_measure_recorded()
+        print(f"[measurement] _all_measure_recorded = {all_done}")
+        if all_done:
             self._finalize()
+        else:
+            # 列出阻塞原因
+            for c in self._channels.values():
+                if c.empty_value is not None and c.measure_value is None:
+                    print(f"[measurement] 阻塞: CH{c.channel} 有空槍值({c.empty_value:.2f})但無量測值")
 
     def get_results(self) -> List[bool]:
         """取得 12 通道的 PASS/FAIL 結果列表"""
@@ -279,10 +301,14 @@ class MeasurementManager:
 
     def _finalize(self):
         """完成量測流程"""
+        print(f"[measurement] _finalize: 狀態 {self._state.value} → COMPLETE")
         self._update_state(MeasurementState.COMPLETE)
         # 注意：現在由 main.py 顯式呼叫 save_cycle_log 以包含 PLC 與耳套資訊
         if self._on_complete:
+            print("[measurement] 呼叫 on_complete 回呼")
             self._on_complete(self.get_result_summary())
+        else:
+            print("[measurement] 警告: 無 on_complete 回呼")
 
     def save_cycle_log(self, is_empty: bool = False, plc_data=None,
                        ear_covers: Dict[int, str] = None,
@@ -389,7 +415,9 @@ class MeasurementManager:
 
     def _update_state(self, state: MeasurementState):
         """更新狀態"""
+        old = self._state.value
         self._state = state
+        print(f"[measurement] 狀態變更: {old} → {state.value}")
         if self._on_state_change:
             self._on_state_change(state)
 

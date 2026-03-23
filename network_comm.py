@@ -126,10 +126,8 @@ class NetworkManager:
             return False
 
     def send_channel_enabled(self, channel_enabled: Dict[int, bool]) -> bool:
-        """傳送通道啟用狀態 (Slave 用)"""
-        if self.role != NetworkRole.SLAVE:
-            return False
-        if self._state != NetworkState.CONNECTED:
+        """傳送通道啟用狀態 (Master/Slave 雙向)"""
+        if self._state != NetworkState.CONNECTED or not self._client_socket:
             return False
         try:
             data = json.dumps({"type": "channel_enabled", "channels": {str(k): v for k, v in channel_enabled.items()}}) + "\n"
@@ -235,13 +233,17 @@ class NetworkManager:
                 time.sleep(3)  # 等待後重試
 
     def _handle_slave_received(self, line: str):
-        """處理 Slave 端收到的 Master 指令"""
+        """處理 Slave 端收到的 Master 指令或通道狀態"""
         try:
             d = json.loads(line)
             if d.get("type") == "command":
                 cmd = d.get("command", "")
                 if self._on_command_callback:
                     self._on_command_callback(cmd)
+            elif d.get("type") == "channel_enabled":
+                channels = {int(k): v for k, v in d.get("channels", {}).items()}
+                if self._on_channel_enabled_callback:
+                    self._on_channel_enabled_callback(channels)
         except Exception as e:
             print(f"解析 Master 指令錯誤: {e}")
 

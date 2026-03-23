@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<title>藍芽連線流程 — 三個關鍵時間參數</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --card: #1e293b;
+    --border: #334155;
+    --accent: #38bdf8;
+    --green: #4ade80;
+    --red: #f87171;
+    --orange: #fb923c;
+    --yellow: #fbbf24;
+    --text: #e2e8f0;
+    --dim: #94a3b8;
+    --purple: #a78bfa;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 30px 40px;
+    line-height: 1.6;
+  }
+  h1 {
+    text-align: center;
+    font-size: 1.6rem;
+    margin-bottom: 8px;
+    color: var(--accent);
+  }
+  .subtitle {
+    text-align: center;
+    color: var(--dim);
+    font-size: 0.95rem;
+    margin-bottom: 30px;
+  }
+
+  /* === 參數卡片 === */
+  .params {
+    display: flex;
+    gap: 20px;
+    justify-content: center;
+    margin-bottom: 36px;
+    flex-wrap: wrap;
+  }
+  .param-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px 24px;
+    width: 280px;
+    position: relative;
+    overflow: hidden;
+  }
+  .param-card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 3px;
+  }
+  .param-card.timeout::before  { background: var(--orange); }
+  .param-card.interval::before { background: var(--accent); }
+  .param-card.cooldown::before { background: var(--purple); }
+  .param-card .label {
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 4px;
+  }
+  .param-card.timeout .label  { color: var(--orange); }
+  .param-card.interval .label { color: var(--accent); }
+  .param-card.cooldown .label { color: var(--purple); }
+  .param-card .name {
+    font-size: 1.15rem;
+    font-weight: 700;
+    margin-bottom: 6px;
+  }
+  .param-card .value {
+    font-family: 'Consolas', monospace;
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin-bottom: 6px;
+  }
+  .param-card.timeout .value  { color: var(--orange); }
+  .param-card.interval .value { color: var(--accent); }
+  .param-card.cooldown .value { color: var(--purple); }
+  .param-card .desc {
+    font-size: 0.85rem;
+    color: var(--dim);
+  }
+  .param-card code {
+    background: rgba(255,255,255,0.08);
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 0.82rem;
+  }
+
+  /* === 流程圖 === */
+  .flow-container {
+    display: flex;
+    gap: 40px;
+    justify-content: center;
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .flow-section {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 24px 28px;
+    min-width: 420px;
+    max-width: 500px;
+    flex: 1;
+  }
+  .flow-section h2 {
+    font-size: 1.1rem;
+    margin-bottom: 20px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .flow-section h2 span {
+    font-size: 0.75rem;
+    color: var(--dim);
+    display: block;
+    font-weight: normal;
+    margin-top: 2px;
+  }
+
+  /* 流程節點 */
+  .node {
+    position: relative;
+    padding: 12px 16px;
+    border-radius: 10px;
+    margin-bottom: 4px;
+    font-size: 0.9rem;
+  }
+  .node.start {
+    background: linear-gradient(135deg, #1e3a5f, #1e293b);
+    border: 1.5px solid var(--accent);
+    text-align: center;
+    font-weight: 600;
+  }
+  .node.action {
+    background: rgba(56, 189, 248, 0.08);
+    border: 1px solid rgba(56, 189, 248, 0.25);
+  }
+  .node.decision {
+    background: rgba(251, 191, 36, 0.08);
+    border: 1px solid rgba(251, 191, 36, 0.3);
+    text-align: center;
+  }
+  .node.success {
+    background: rgba(74, 222, 128, 0.08);
+    border: 1px solid rgba(74, 222, 128, 0.3);
+  }
+  .node.fail {
+    background: rgba(248, 113, 113, 0.08);
+    border: 1px solid rgba(248, 113, 113, 0.3);
+  }
+  .node.wait {
+    background: rgba(167, 139, 250, 0.08);
+    border: 1px solid rgba(167, 139, 250, 0.3);
+  }
+  .node .tag {
+    display: inline-block;
+    font-size: 0.7rem;
+    padding: 1px 7px;
+    border-radius: 4px;
+    margin-right: 6px;
+    font-weight: 600;
+    vertical-align: middle;
+  }
+  .tag.t-timeout  { background: var(--orange); color: #000; }
+  .tag.t-interval { background: var(--accent);  color: #000; }
+  .tag.t-cooldown { background: var(--purple);  color: #000; }
+
+  /* 箭頭連接線 */
+  .arrow {
+    text-align: center;
+    color: var(--dim);
+    font-size: 1.1rem;
+    line-height: 1.2;
+    margin: 2px 0;
+    user-select: none;
+  }
+  .arrow .label-text {
+    font-size: 0.75rem;
+    color: var(--dim);
+    vertical-align: middle;
+  }
+  .arrow .yes { color: var(--green); font-size: 0.78rem; font-weight: 600; }
+  .arrow .no  { color: var(--red);   font-size: 0.78rem; font-weight: 600; }
+
+  /* === 時間軸圖 === */
+  .timeline-section {
+    margin-top: 36px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 24px 28px;
+  }
+  .timeline-section h2 {
+    font-size: 1.1rem;
+    margin-bottom: 6px;
+  }
+  .timeline-section .note {
+    font-size: 0.82rem;
+    color: var(--dim);
+    margin-bottom: 18px;
+  }
+
+  /* SVG 時間軸 */
+  .timeline-svg {
+    width: 100%;
+    overflow-x: auto;
+  }
+  svg text { font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif; }
+
+  /* === 表格 === */
+  .table-section {
+    margin-top: 36px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 24px 28px;
+  }
+  .table-section h2 {
+    font-size: 1.1rem;
+    margin-bottom: 14px;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.88rem;
+  }
+  th {
+    text-align: left;
+    padding: 8px 12px;
+    border-bottom: 2px solid var(--border);
+    color: var(--dim);
+    font-weight: 600;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  td {
+    padding: 8px 12px;
+    border-bottom: 1px solid rgba(51,65,85,0.5);
+  }
+  td:first-child { font-weight: 600; }
+  tr:last-child td { border-bottom: none; }
+  .mono { font-family: 'Consolas', monospace; }
+  .c-orange { color: var(--orange); }
+  .c-blue   { color: var(--accent); }
+  .c-purple { color: var(--purple); }
+  .c-green  { color: var(--green); }
+  .c-red    { color: var(--red); }
+  .c-yellow { color: var(--yellow); }
+
+  /* Loop arrow */
+  .loop-back {
+    border: 1.5px dashed var(--dim);
+    border-top: none;
+    border-right: none;
+    width: 30px;
+    height: 40px;
+    border-radius: 0 0 0 10px;
+    margin: -8px 0 -8px 40px;
+    position: relative;
+  }
+  .loop-back::after {
+    content: '↑';
+    position: absolute;
+    top: -14px;
+    left: -8px;
+    font-size: 1rem;
+    color: var(--dim);
+  }
+</style>
+</head>
+<body>
+
+<h1>藍芽連線流程 — 三個關鍵時間參數</h1>
+<p class="subtitle">BluetoothManager._connection_manager() 的初始化連線與斷線重連機制</p>
+
+<!-- ===== 參數卡片 ===== -->
+<div class="params">
+  <div class="param-card timeout">
+    <div class="label">參數 ①</div>
+    <div class="name">connect_timeout</div>
+    <div class="value">10 秒</div>
+    <div class="desc">
+      單次 <code>socket.connect()</code> 的最長等待時間。<br>
+      超過此時間視為連線失敗，拋出 timeout 例外。
+    </div>
+  </div>
+  <div class="param-card interval">
+    <div class="label">參數 ②</div>
+    <div class="name">reconnect_interval</div>
+    <div class="value">5 秒</div>
+    <div class="desc">
+      每一輪重連嘗試後的<strong>基本間隔</strong>。<br>
+      無論成功或失敗，都會 <code>sleep(5)</code> 再進入下一輪。
+    </div>
+  </div>
+  <div class="param-card cooldown">
+    <div class="label">參數 ③</div>
+    <div class="name">cooldown（冷卻時間）</div>
+    <div class="value">min(次數×5, 30) 秒</div>
+    <div class="desc">
+      連續失敗 ≥3 次時啟用。公式：<code>min(fail_count × 5, 30)</code><br>
+      在冷卻期間，該通道會被跳過、不參與重連。
+    </div>
+  </div>
+</div>
+
+<!-- ===== 流程圖 ===== -->
+<div class="flow-container">
+
+  <!-- 左：初始化連線 -->
+  <div class="flow-section">
+    <h2>🔌 階段一：初始化連線 <span>_connection_manager() 啟動時</span></h2>
+
+    <div class="node start">啟動 BluetoothManager.start()</div>
+    <div class="arrow">↓</div>
+
+    <div class="node action">🔧 藍芽堆疊暖機 <span style="color:var(--dim); font-size:0.82rem">（探測連線 timeout=3s）</span></div>
+    <div class="arrow">↓ <span class="label-text">sleep(1.0) 等待堆疊消化</span></div>
+
+    <div class="node action">📋 收集所有啟用通道 <span style="color:var(--dim); font-size:0.82rem">[CH1, CH2, ... CH6]</span></div>
+    <div class="arrow">↓</div>
+
+    <div class="node action" style="border-color: rgba(251,146,60,0.5);">
+      ⚡ <strong>同時連線</strong>所有通道（_connect_parallel）<br>
+      <span style="font-size:0.82rem; color:var(--dim)">每通道各開一條 thread → socket.connect()</span><br>
+      <span class="tag t-timeout">connect_timeout</span>
+      <span style="font-size:0.82rem">每個 socket 最多等 <strong class="c-orange">10 秒</strong></span>
+    </div>
+    <div class="arrow">↓ <span class="label-text">所有 thread.join() 完成</span></div>
+
+    <div class="node decision">各通道結果？</div>
+    <div style="display:flex; gap:12px; margin: 4px 0;">
+      <div class="node success" style="flex:1; text-align:center;">
+        ✅ 成功<br>
+        <span style="font-size:0.82rem">state = CONNECTED<br>開始收資料</span>
+      </div>
+      <div class="node fail" style="flex:1; text-align:center;">
+        ❌ 失敗<br>
+        <span style="font-size:0.82rem">state = ERROR<br>進入階段二重連</span>
+      </div>
+    </div>
+    <div class="arrow">↓</div>
+    <div class="node start">進入監控迴圈（階段二）</div>
+  </div>
+
+  <!-- 右：斷線重連 -->
+  <div class="flow-section">
+    <h2>🔄 階段二：監控 & 斷線重連 <span>while _running 迴圈</span></h2>
+
+    <div class="node start">監控迴圈開始</div>
+    <div class="arrow">↓</div>
+
+    <div class="node decision">全部通道都已連線？</div>
+    <div class="arrow"><span class="yes">YES</span> → sleep(2.0) 低頻監控 → 回到迴圈頂端</div>
+    <div class="arrow"><span class="no">NO</span> ↓ <span class="label-text">找出需重連的通道</span></div>
+
+    <div class="node decision">
+      該通道有冷卻中？<br>
+      <span style="font-size:0.8rem; color:var(--dim)">now &lt; next_retry_time[ch]</span>
+    </div>
+    <div class="arrow"><span class="yes">YES</span> → 跳過此通道</div>
+    <div class="arrow"><span class="no">NO</span> ↓ <span class="label-text">加入重連清單</span></div>
+
+    <div class="node action" style="border-color: rgba(251,146,60,0.5);">
+      ⚡ <strong>同時重連</strong>所有斷線通道<br>
+      <span class="tag t-timeout">connect_timeout</span>
+      <span style="font-size:0.82rem">每個 socket 最多等 <strong class="c-orange">10 秒</strong></span>
+    </div>
+    <div class="arrow">↓</div>
+
+    <div class="node decision">連線結果？</div>
+    <div style="display:flex; gap:12px; margin: 4px 0;">
+      <div class="node success" style="flex:1;">
+        ✅ <strong>成功</strong><br>
+        <span style="font-size:0.82rem">fail_count = 0<br>清除冷卻計時</span>
+      </div>
+      <div class="node fail" style="flex:1;">
+        ❌ <strong>失敗</strong><br>
+        <span style="font-size:0.82rem">fail_count++</span><br>
+        <span style="font-size:0.82rem; color:var(--dim)">若 fail_count ≥ 3：</span><br>
+        <span class="tag t-cooldown">cooldown</span>
+        <span style="font-size:0.82rem">設定 <strong class="c-purple">min(n×5, 30)秒</strong> 冷卻</span>
+      </div>
+    </div>
+    <div class="arrow">↓</div>
+
+    <div class="node wait">
+      <span class="tag t-interval">reconnect_interval</span>
+      <strong>sleep(<span class="c-blue">5 秒</span>)</strong> 基本間隔
+    </div>
+    <div class="arrow">↓ 回到迴圈頂端 ↺</div>
+  </div>
+</div>
+
+<!-- ===== 時間軸圖 ===== -->
+<div class="timeline-section">
+  <h2>⏱ 時間軸範例：CH10 連續失敗的實際等待時間</h2>
+  <p class="note">每次重連嘗試 = connect_timeout(最多10s) + reconnect_interval(5s) + cooldown(若有)</p>
+
+  <div class="timeline-svg">
+    <svg viewBox="0 0 1050 420" xmlns="http://www.w3.org/2000/svg" style="max-width:1050px;">
+      <!-- 時間軸底線 -->
+      <line x1="40" y1="360" x2="1020" y2="360" stroke="#475569" stroke-width="1.5"/>
+      <!-- 刻度 -->
+      <g fill="#64748b" font-size="11">
+        <text x="40" y="380" text-anchor="middle">0s</text>
+        <text x="190" y="380" text-anchor="middle">15s</text>
+        <text x="340" y="380" text-anchor="middle">30s</text>
+        <text x="490" y="380" text-anchor="middle">45s</text>
+        <text x="640" y="380" text-anchor="middle">60s</text>
+        <text x="790" y="380" text-anchor="middle">75s</text>
+        <text x="940" y="380" text-anchor="middle">90s</text>
+      </g>
+
+      <!-- 比例: 1秒 = 10px, 起點 x=40 -->
+
+      <!-- === 第1次 fail_count=1 === -->
+      <rect x="40" y="60" width="100" height="28" rx="4" fill="rgba(251,146,60,0.2)" stroke="#fb923c" stroke-width="1"/>
+      <text x="90" y="78" text-anchor="middle" fill="#fb923c" font-size="11" font-weight="600">connect 10s</text>
+      <text x="90" y="50" text-anchor="middle" fill="#f87171" font-size="12" font-weight="700">❌ 失敗 #1</text>
+      <rect x="140" y="60" width="50" height="28" rx="4" fill="rgba(56,189,248,0.15)" stroke="#38bdf8" stroke-width="1"/>
+      <text x="165" y="78" text-anchor="middle" fill="#38bdf8" font-size="10" font-weight="600">間隔 5s</text>
+
+      <!-- === 第2次 fail_count=2 === -->
+      <rect x="190" y="120" width="100" height="28" rx="4" fill="rgba(251,146,60,0.2)" stroke="#fb923c" stroke-width="1"/>
+      <text x="240" y="138" text-anchor="middle" fill="#fb923c" font-size="11" font-weight="600">connect 10s</text>
+      <text x="240" y="110" text-anchor="middle" fill="#f87171" font-size="12" font-weight="700">❌ 失敗 #2</text>
+      <rect x="290" y="120" width="50" height="28" rx="4" fill="rgba(56,189,248,0.15)" stroke="#38bdf8" stroke-width="1"/>
+      <text x="315" y="138" text-anchor="middle" fill="#38bdf8" font-size="10" font-weight="600">間隔 5s</text>
+
+      <!-- === 第3次 fail_count=3, cooldown=15s === -->
+      <rect x="340" y="180" width="100" height="28" rx="4" fill="rgba(251,146,60,0.2)" stroke="#fb923c" stroke-width="1"/>
+      <text x="390" y="198" text-anchor="middle" fill="#fb923c" font-size="11" font-weight="600">connect 10s</text>
+      <text x="390" y="170" text-anchor="middle" fill="#f87171" font-size="12" font-weight="700">❌ 失敗 #3</text>
+      <rect x="440" y="180" width="50" height="28" rx="4" fill="rgba(56,189,248,0.15)" stroke="#38bdf8" stroke-width="1"/>
+      <text x="465" y="198" text-anchor="middle" fill="#38bdf8" font-size="10" font-weight="600">間隔 5s</text>
+      <!-- cooldown 15s -->
+      <rect x="490" y="180" width="150" height="28" rx="4" fill="rgba(167,139,250,0.15)" stroke="#a78bfa" stroke-width="1" stroke-dasharray="4,3"/>
+      <text x="565" y="198" text-anchor="middle" fill="#a78bfa" font-size="11" font-weight="600">🧊 冷卻 15s</text>
+      <text x="565" y="218" text-anchor="middle" fill="#64748b" font-size="9">min(3×5, 30) = 15</text>
+
+      <!-- === 第4次 fail_count=4, cooldown=20s === -->
+      <rect x="640" y="240" width="100" height="28" rx="4" fill="rgba(251,146,60,0.2)" stroke="#fb923c" stroke-width="1"/>
+      <text x="690" y="258" text-anchor="middle" fill="#fb923c" font-size="11" font-weight="600">connect 10s</text>
+      <text x="690" y="230" text-anchor="middle" fill="#f87171" font-size="12" font-weight="700">❌ 失敗 #4</text>
+      <rect x="740" y="240" width="50" height="28" rx="4" fill="rgba(56,189,248,0.15)" stroke="#38bdf8" stroke-width="1"/>
+      <text x="765" y="258" text-anchor="middle" fill="#38bdf8" font-size="10" font-weight="600">間隔 5s</text>
+      <!-- cooldown 20s -->
+      <rect x="790" y="240" width="200" height="28" rx="4" fill="rgba(167,139,250,0.15)" stroke="#a78bfa" stroke-width="1" stroke-dasharray="4,3"/>
+      <text x="890" y="258" text-anchor="middle" fill="#a78bfa" font-size="11" font-weight="600">🧊 冷卻 20s</text>
+      <text x="890" y="278" text-anchor="middle" fill="#64748b" font-size="9">min(4×5, 30) = 20</text>
+
+      <!-- 圖例 -->
+      <rect x="40" y="400" width="16" height="12" rx="2" fill="rgba(251,146,60,0.3)" stroke="#fb923c"/>
+      <text x="62" y="411" fill="#94a3b8" font-size="10">connect_timeout (10s)</text>
+      <rect x="220" y="400" width="16" height="12" rx="2" fill="rgba(56,189,248,0.2)" stroke="#38bdf8"/>
+      <text x="242" y="411" fill="#94a3b8" font-size="10">reconnect_interval (5s)</text>
+      <rect x="420" y="400" width="16" height="12" rx="2" fill="rgba(167,139,250,0.2)" stroke="#a78bfa" stroke-dasharray="3,2"/>
+      <text x="442" y="411" fill="#94a3b8" font-size="10">cooldown 冷卻 (漸進式)</text>
+
+      <!-- 連接虛線 -->
+      <line x1="190" y1="88" x2="190" y2="120" stroke="#475569" stroke-width="1" stroke-dasharray="3,3"/>
+      <line x1="340" y1="148" x2="340" y2="180" stroke="#475569" stroke-width="1" stroke-dasharray="3,3"/>
+      <line x1="640" y1="208" x2="640" y2="240" stroke="#475569" stroke-width="1" stroke-dasharray="3,3"/>
+    </svg>
+  </div>
+</div>
+
+<!-- ===== 冷卻時間對照表 ===== -->
+<div class="table-section">
+  <h2>📊 冷卻時間遞增對照表</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>連續失敗次數</th>
+        <th>冷卻公式</th>
+        <th>冷卻時間</th>
+        <th>單輪最長等待<br><span style="font-weight:normal; font-size:0.75rem">timeout + interval + cooldown</span></th>
+        <th>累計最長時間</th>
+        <th>狀態</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="c-green">第 1 次</td>
+        <td class="mono" style="color:var(--dim)">—</td>
+        <td class="mono c-green">0 秒</td>
+        <td class="mono">10 + 5 + 0 = <strong>15 秒</strong></td>
+        <td class="mono">15 秒</td>
+        <td><span style="color:var(--green)">⬤</span> 立即重試</td>
+      </tr>
+      <tr>
+        <td class="c-green">第 2 次</td>
+        <td class="mono" style="color:var(--dim)">—</td>
+        <td class="mono c-green">0 秒</td>
+        <td class="mono">10 + 5 + 0 = <strong>15 秒</strong></td>
+        <td class="mono">30 秒</td>
+        <td><span style="color:var(--green)">⬤</span> 立即重試</td>
+      </tr>
+      <tr>
+        <td class="c-yellow">第 3 次</td>
+        <td class="mono c-purple">min(3×5, 30)</td>
+        <td class="mono c-purple">15 秒</td>
+        <td class="mono">10 + 5 + 15 = <strong>30 秒</strong></td>
+        <td class="mono">60 秒</td>
+        <td><span style="color:var(--yellow)">⬤</span> 開始冷卻</td>
+      </tr>
+      <tr>
+        <td class="c-yellow">第 4 次</td>
+        <td class="mono c-purple">min(4×5, 30)</td>
+        <td class="mono c-purple">20 秒</td>
+        <td class="mono">10 + 5 + 20 = <strong>35 秒</strong></td>
+        <td class="mono">95 秒</td>
+        <td><span style="color:var(--yellow)">⬤</span> 冷卻加長</td>
+      </tr>
+      <tr>
+        <td class="c-orange">第 5 次</td>
+        <td class="mono c-purple">min(5×5, 30)</td>
+        <td class="mono c-purple">25 秒</td>
+        <td class="mono">10 + 5 + 25 = <strong>40 秒</strong></td>
+        <td class="mono">135 秒</td>
+        <td><span style="color:var(--orange)">⬤</span> 冷卻加長</td>
+      </tr>
+      <tr>
+        <td class="c-red">第 6 次 +</td>
+        <td class="mono c-purple">min(6×5, 30)</td>
+        <td class="mono c-purple" style="font-weight:700">30 秒 (上限)</td>
+        <td class="mono">10 + 5 + 30 = <strong>45 秒</strong></td>
+        <td class="mono">180 秒</td>
+        <td><span style="color:var(--red)">⬤</span> 最大冷卻</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ===== 關鍵重點 ===== -->
+<div class="table-section" style="margin-top: 36px;">
+  <h2>💡 三個參數的關係總結</h2>
+  <table>
+    <thead>
+      <tr><th style="width:180px">特性</th><th>說明</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="c-orange">connect_timeout</td>
+        <td>控制<strong>單次嘗試的上限</strong>。socket.connect() 最多等 10 秒就放棄。這決定了「嘗試連線」這個動作本身要花多久。</td>
+      </tr>
+      <tr>
+        <td class="c-blue">reconnect_interval</td>
+        <td>控制<strong>重連輪次間的節奏</strong>。每輪重連（不論成功或失敗）後固定 sleep 5 秒，避免太密集地打藍芽堆疊。</td>
+      </tr>
+      <tr>
+        <td class="c-purple">cooldown</td>
+        <td>控制<strong>失敗累積後的退避</strong>。前 2 次失敗不冷卻（快速重試）；第 3 次起漸進增加（15→20→25→<strong>30 秒封頂</strong>），避免對無回應設備無限快速重連。</td>
+      </tr>
+      <tr>
+        <td>三者疊加</td>
+        <td>最壞情況（失敗 6+ 次）每輪等待：<code class="c-orange">10s</code> timeout + <code class="c-blue">5s</code> interval + <code class="c-purple">30s</code> cooldown = <strong>45 秒/輪</strong></td>
+      </tr>
+      <tr>
+        <td>初始化階段</td>
+        <td>初始化時所有通道<strong>同時並行連線</strong>，不受 cooldown 影響，只受 connect_timeout 限制（最多 10 秒全部完成）</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+</body>
+</html>

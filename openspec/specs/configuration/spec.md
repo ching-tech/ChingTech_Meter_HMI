@@ -12,7 +12,7 @@
 | 欄位 | 型別 | 預設值 | 說明 |
 |------|------|--------|------|
 | version | str | "2.1.0" | 版本號 |
-| title | str | "三橋耳溫槍探頭套檢測系統" | 視窗標題 |
+| title | str | "擎添耳溫槍探頭套檢測系統" | 視窗標題 |
 | window_width | int | 1200 | 視窗寬度 |
 | window_height | int | 850 | 視窗高度 |
 | simulation_mode | bool | false | 模擬模式開關 |

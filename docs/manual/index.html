@@ -1,0 +1,1248 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>擎添耳溫槍探頭套檢測系統 - 操作說明書</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --sidebar: #1e293b;
+    --card: #1e293b;
+    --card2: #283548;
+    --border: #334155;
+    --accent: #38bdf8;
+    --green: #4ade80;
+    --red: #f87171;
+    --orange: #fb923c;
+    --yellow: #fbbf24;
+    --purple: #a78bfa;
+    --text: #e2e8f0;
+    --dim: #94a3b8;
+    --white: #f8fafc;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    display: flex;
+    min-height: 100vh;
+  }
+
+  /* ===== Sidebar Navigation ===== */
+  .sidebar {
+    position: fixed;
+    top: 0; left: 0;
+    width: 260px;
+    height: 100vh;
+    background: var(--sidebar);
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+  }
+  .sidebar-header {
+    padding: 20px 16px 12px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .sidebar-header h1 {
+    font-size: 1rem;
+    color: var(--accent);
+    line-height: 1.4;
+  }
+  .sidebar-header .ver {
+    font-size: 0.75rem;
+    color: var(--dim);
+    margin-top: 4px;
+  }
+  .sidebar nav {
+    padding: 8px 0;
+    flex: 1;
+    overflow-y: auto;
+  }
+  .nav-section {
+    padding: 6px 16px 2px;
+    font-size: 0.7rem;
+    color: var(--dim);
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    font-weight: 700;
+    margin-top: 8px;
+  }
+  .nav-link {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 16px 7px 20px;
+    color: var(--dim);
+    text-decoration: none;
+    font-size: 0.88rem;
+    border-left: 3px solid transparent;
+    transition: all 0.15s;
+  }
+  .nav-link:hover {
+    background: rgba(56,189,248,0.08);
+    color: var(--text);
+  }
+  .nav-link.active {
+    background: rgba(56,189,248,0.1);
+    color: var(--accent);
+    border-left-color: var(--accent);
+    font-weight: 600;
+  }
+  .nav-link .icon { font-size: 1rem; width: 20px; text-align: center; }
+
+  /* ===== Main Content ===== */
+  .main {
+    margin-left: 260px;
+    flex: 1;
+    min-width: 0;
+  }
+
+  /* Page sections */
+  .page-section {
+    display: none;
+    padding: 32px 40px 60px;
+    max-width: 960px;
+    animation: fadeIn 0.2s ease;
+  }
+  .page-section.active { display: block; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+  h2 {
+    font-size: 1.6rem;
+    color: var(--accent);
+    margin-bottom: 8px;
+    padding-bottom: 8px;
+    border-bottom: 2px solid var(--border);
+  }
+  h3 {
+    font-size: 1.15rem;
+    color: var(--white);
+    margin: 24px 0 10px;
+  }
+  h4 {
+    font-size: 1rem;
+    color: var(--yellow);
+    margin: 18px 0 8px;
+  }
+  p { margin: 8px 0; font-size: 0.92rem; }
+  ul, ol { margin: 8px 0 8px 24px; font-size: 0.92rem; }
+  li { margin: 4px 0; }
+
+  /* Cards */
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px 22px;
+    margin: 14px 0;
+  }
+  .card.highlight {
+    border-color: var(--accent);
+    background: rgba(56,189,248,0.05);
+  }
+  .card.warn {
+    border-color: var(--orange);
+    background: rgba(251,146,60,0.06);
+  }
+  .card.danger {
+    border-color: var(--red);
+    background: rgba(248,113,113,0.06);
+  }
+  .card.success {
+    border-color: var(--green);
+    background: rgba(74,222,128,0.06);
+  }
+  .card-title {
+    font-size: 0.95rem;
+    font-weight: 700;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  /* Tags */
+  .tag {
+    display: inline-block;
+    font-size: 0.72rem;
+    padding: 1px 8px;
+    border-radius: 4px;
+    font-weight: 700;
+    vertical-align: middle;
+  }
+  .tag.master { background: #2563eb; color: #fff; }
+  .tag.slave  { background: #ea580c; color: #fff; }
+  .tag.both   { background: #7c3aed; color: #fff; }
+
+  /* Tables */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.88rem;
+    margin: 12px 0;
+  }
+  th {
+    text-align: left;
+    padding: 8px 12px;
+    background: var(--card2);
+    border-bottom: 2px solid var(--border);
+    color: var(--dim);
+    font-weight: 700;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  td {
+    padding: 8px 12px;
+    border-bottom: 1px solid rgba(51,65,85,0.5);
+    vertical-align: top;
+  }
+  tr:last-child td { border-bottom: none; }
+
+  /* Code */
+  code {
+    background: rgba(255,255,255,0.08);
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-family: Consolas, monospace;
+    font-size: 0.85rem;
+    color: var(--orange);
+  }
+
+  /* Color helpers */
+  .c-accent { color: var(--accent); }
+  .c-green  { color: var(--green); }
+  .c-red    { color: var(--red); }
+  .c-orange { color: var(--orange); }
+  .c-yellow { color: var(--yellow); }
+  .c-purple { color: var(--purple); }
+  .c-dim    { color: var(--dim); }
+  .c-white  { color: var(--white); }
+  .bold     { font-weight: 700; }
+
+  /* Flow diagram */
+  .flow {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0;
+    margin: 16px 0;
+  }
+  .flow-node {
+    padding: 10px 20px;
+    border-radius: 10px;
+    text-align: center;
+    font-size: 0.9rem;
+    width: 80%;
+    max-width: 400px;
+  }
+  .flow-node.start  { background: rgba(56,189,248,0.12); border: 1.5px solid var(--accent); font-weight: 700; }
+  .flow-node.action { background: rgba(56,189,248,0.06); border: 1px solid rgba(56,189,248,0.25); }
+  .flow-node.decide { background: rgba(251,191,36,0.08); border: 1px solid rgba(251,191,36,0.3); }
+  .flow-node.ok     { background: rgba(74,222,128,0.08); border: 1px solid rgba(74,222,128,0.3); }
+  .flow-node.ng     { background: rgba(248,113,113,0.08); border: 1px solid rgba(248,113,113,0.3); }
+  .flow-arrow {
+    color: var(--dim);
+    font-size: 1.2rem;
+    line-height: 1;
+    padding: 2px 0;
+    user-select: none;
+  }
+  .flow-arrow .lbl { font-size: 0.78rem; }
+  .flow-split {
+    display: flex;
+    gap: 12px;
+    width: 80%;
+    max-width: 400px;
+  }
+  .flow-split > * { flex: 1; }
+
+  /* Keyboard shortcut style */
+  kbd {
+    background: var(--card2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-family: Consolas, monospace;
+    font-size: 0.82rem;
+    color: var(--white);
+  }
+
+  /* Screenshot placeholder */
+  .screenshot {
+    background: var(--card2);
+    border: 1px dashed var(--border);
+    border-radius: 10px;
+    padding: 30px 20px;
+    text-align: center;
+    color: var(--dim);
+    font-size: 0.85rem;
+    margin: 14px 0;
+  }
+
+  /* Numbered steps */
+  .steps { counter-reset: step; list-style: none; margin-left: 0; }
+  .steps li {
+    counter-increment: step;
+    padding: 10px 0 10px 40px;
+    position: relative;
+    border-left: 2px solid var(--border);
+    margin-left: 14px;
+  }
+  .steps li:last-child { border-left-color: transparent; }
+  .steps li::before {
+    content: counter(step);
+    position: absolute;
+    left: -14px;
+    top: 8px;
+    width: 26px;
+    height: 26px;
+    background: var(--accent);
+    color: #000;
+    border-radius: 50%;
+    font-size: 0.8rem;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* Status colors */
+  .status-dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    vertical-align: middle;
+    margin-right: 4px;
+  }
+  .status-dot.green  { background: var(--green); }
+  .status-dot.yellow { background: var(--yellow); }
+  .status-dot.red    { background: var(--red); }
+  .status-dot.gray   { background: #64748b; }
+  .status-dot.blue   { background: var(--accent); }
+
+  /* TOC on overview */
+  .toc {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin: 20px 0;
+  }
+  .toc-item {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    cursor: pointer;
+    transition: all 0.15s;
+    text-decoration: none;
+    color: var(--text);
+  }
+  .toc-item:hover {
+    border-color: var(--accent);
+    background: rgba(56,189,248,0.06);
+  }
+  .toc-item .toc-icon { font-size: 1.4rem; margin-bottom: 4px; }
+  .toc-item .toc-title { font-weight: 700; font-size: 0.95rem; }
+  .toc-item .toc-desc { font-size: 0.8rem; color: var(--dim); margin-top: 2px; }
+
+  /* Print */
+  @media print {
+    .sidebar { display: none; }
+    .main { margin-left: 0; }
+    .page-section { display: block !important; page-break-before: always; }
+    .page-section:first-child { page-break-before: auto; }
+  }
+
+  /* Responsive */
+  @media (max-width: 800px) {
+    .sidebar { width: 220px; }
+    .main { margin-left: 220px; }
+    .page-section { padding: 20px; }
+    .toc { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ===== Sidebar ===== -->
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <h1>擎添耳溫槍探頭套<br>檢測系統</h1>
+    <div class="ver">操作說明書 v2.1</div>
+  </div>
+  <nav>
+    <div class="nav-section">概覽</div>
+    <a class="nav-link active" data-page="overview"><span class="icon">&#128218;</span> 系統總覽</a>
+    <a class="nav-link" data-page="architecture"><span class="icon">&#128300;</span> 系統架構</a>
+
+    <div class="nav-section">快速入門</div>
+    <a class="nav-link" data-page="startup"><span class="icon">&#9889;</span> 啟動與關閉</a>
+    <a class="nav-link" data-page="ui-overview"><span class="icon">&#128421;</span> 主畫面介紹</a>
+
+    <div class="nav-section">操作流程</div>
+    <a class="nav-link" data-page="measure-flow"><span class="icon">&#127777;</span> 量測流程</a>
+    <a class="nav-link" data-page="batch"><span class="icon">&#128194;</span> 批次與記錄</a>
+    <a class="nav-link" data-page="alarm"><span class="icon">&#128680;</span> 異常警報處理</a>
+
+    <div class="nav-section">進階設定</div>
+    <a class="nav-link" data-page="settings"><span class="icon">&#9881;</span> 進階設定面板</a>
+    <a class="nav-link" data-page="bluetooth"><span class="icon">&#128246;</span> 藍芽連線管理</a>
+    <a class="nav-link" data-page="plc"><span class="icon">&#129518;</span> PLC 通訊</a>
+    <a class="nav-link" data-page="network"><span class="icon">&#127760;</span> Master-Slave 網路</a>
+
+    <div class="nav-section">附錄</div>
+    <a class="nav-link" data-page="channels"><span class="icon">&#128290;</span> 通道對應表</a>
+    <a class="nav-link" data-page="faq"><span class="icon">&#10067;</span> 常見問題</a>
+  </nav>
+</aside>
+
+<!-- ===== Main Content ===== -->
+<div class="main">
+
+<!-- ==================== 1. 系統總覽 ==================== -->
+<section class="page-section active" id="overview">
+  <h2>系統總覽</h2>
+  <p>「擎添耳溫槍探頭套檢測系統」是一套工業級自動化 HMI 軟體，用於檢測耳溫槍探頭套品質。系統透過 <strong>藍芽</strong> 連接最多 12 支耳溫槍、與 <strong>PLC</strong> 整合產線觸發信號，並以 <strong>Master-Slave 雙機架構</strong> 分散管理通道。</p>
+
+  <div class="card highlight">
+    <div class="card-title c-accent">核心功能一覽</div>
+    <ul>
+      <li><strong>12 通道同時監測</strong> — Master 負責 6 通道 (CH1/3/5/7/9/11)，Slave 負責另外 6 通道 (CH2/4/6/8/10/12)</li>
+      <li><strong>自動量測判定</strong> — 空槍值 → 量測值 → 誤差計算 → PASS/FAIL 自動判定</li>
+      <li><strong>PLC 整合</strong> — 接收產線觸發信號，回寫判定結果與異常狀態</li>
+      <li><strong>異常即時警報</strong> — 藍芽斷線、溫度異常、連續無耳溫套、PLC/網路異常</li>
+      <li><strong>CSV 完整記錄</strong> — 每次量測自動記錄，含溫度、耳套狀態、OK/NG 計數</li>
+    </ul>
+  </div>
+
+  <h3>快速導覽</h3>
+  <div class="toc">
+    <a class="toc-item" data-goto="startup">
+      <div class="toc-icon">&#9889;</div>
+      <div class="toc-title">啟動與關閉</div>
+      <div class="toc-desc">如何開啟程式、確認連線狀態、安全關閉</div>
+    </a>
+    <a class="toc-item" data-goto="ui-overview">
+      <div class="toc-icon">&#128421;</div>
+      <div class="toc-title">主畫面介紹</div>
+      <div class="toc-desc">認識每個區域的功能與顯示意義</div>
+    </a>
+    <a class="toc-item" data-goto="measure-flow">
+      <div class="toc-icon">&#127777;</div>
+      <div class="toc-title">量測流程</div>
+      <div class="toc-desc">空槍量測 → 溫度量測 → 判定結果</div>
+    </a>
+    <a class="toc-item" data-goto="alarm">
+      <div class="toc-icon">&#128680;</div>
+      <div class="toc-title">異常警報處理</div>
+      <div class="toc-desc">各種警報的意義與處理方式</div>
+    </a>
+    <a class="toc-item" data-goto="settings">
+      <div class="toc-icon">&#9881;</div>
+      <div class="toc-title">進階設定</div>
+      <div class="toc-desc">修改誤差範圍、異常門檻、連線參數</div>
+    </a>
+    <a class="toc-item" data-goto="faq">
+      <div class="toc-icon">&#10067;</div>
+      <div class="toc-title">常見問題</div>
+      <div class="toc-desc">疑難排解與常見操作問答</div>
+    </a>
+  </div>
+</section>
+
+<!-- ==================== 2. 系統架構 ==================== -->
+<section class="page-section" id="architecture">
+  <h2>系統架構</h2>
+
+  <h3>硬體架構圖</h3>
+  <div class="card">
+    <svg viewBox="0 0 800 420" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:800px;">
+      <!-- PLC -->
+      <rect x="20" y="170" width="120" height="80" rx="10" fill="#1e293b" stroke="#a78bfa" stroke-width="2"/>
+      <text x="80" y="200" text-anchor="middle" fill="#a78bfa" font-size="13" font-weight="bold" font-family="Segoe UI">PLC FX5U</text>
+      <text x="80" y="220" text-anchor="middle" fill="#94a3b8" font-size="10" font-family="Segoe UI">MC Protocol 3E</text>
+      <text x="80" y="236" text-anchor="middle" fill="#94a3b8" font-size="10" font-family="Segoe UI">D500~D542</text>
+
+      <!-- Master -->
+      <rect x="230" y="130" width="160" height="160" rx="12" fill="#1e293b" stroke="#38bdf8" stroke-width="2.5"/>
+      <text x="310" y="160" text-anchor="middle" fill="#38bdf8" font-size="15" font-weight="bold" font-family="Segoe UI">MASTER</text>
+      <text x="310" y="180" text-anchor="middle" fill="#e2e8f0" font-size="10" font-family="Segoe UI">Port 8080</text>
+      <text x="310" y="200" text-anchor="middle" fill="#94a3b8" font-size="10" font-family="Segoe UI">CH11, CH9, CH7</text>
+      <text x="310" y="215" text-anchor="middle" fill="#94a3b8" font-size="10" font-family="Segoe UI">CH5, CH3, CH1</text>
+      <text x="310" y="240" text-anchor="middle" fill="#4ade80" font-size="10" font-family="Segoe UI">判定邏輯 / CSV 記錄</text>
+      <text x="310" y="258" text-anchor="middle" fill="#4ade80" font-size="10" font-family="Segoe UI">異常偵測 / PLC 通訊</text>
+      <text x="310" y="276" text-anchor="middle" fill="#fbbf24" font-size="10" font-family="Segoe UI">BT x6 通道</text>
+
+      <!-- Slave -->
+      <rect x="480" y="130" width="160" height="160" rx="12" fill="#1e293b" stroke="#fb923c" stroke-width="2.5"/>
+      <text x="560" y="160" text-anchor="middle" fill="#fb923c" font-size="15" font-weight="bold" font-family="Segoe UI">SLAVE</text>
+      <text x="560" y="180" text-anchor="middle" fill="#e2e8f0" font-size="10" font-family="Segoe UI">Port 8081</text>
+      <text x="560" y="200" text-anchor="middle" fill="#94a3b8" font-size="10" font-family="Segoe UI">CH12, CH10, CH8</text>
+      <text x="560" y="215" text-anchor="middle" fill="#94a3b8" font-size="10" font-family="Segoe UI">CH6, CH4, CH2</text>
+      <text x="560" y="240" text-anchor="middle" fill="#4ade80" font-size="10" font-family="Segoe UI">資料收集 / 轉發</text>
+      <text x="560" y="276" text-anchor="middle" fill="#fbbf24" font-size="10" font-family="Segoe UI">BT x6 通道</text>
+
+      <!-- 耳溫槍 Master -->
+      <rect x="210" y="340" width="200" height="50" rx="8" fill="#1e293b" stroke="#fbbf24" stroke-width="1.5"/>
+      <text x="310" y="362" text-anchor="middle" fill="#fbbf24" font-size="12" font-weight="bold" font-family="Segoe UI">耳溫槍 x6</text>
+      <text x="310" y="378" text-anchor="middle" fill="#94a3b8" font-size="10" font-family="Segoe UI">Bluetooth RFCOMM SPP</text>
+
+      <!-- 耳溫槍 Slave -->
+      <rect x="460" y="340" width="200" height="50" rx="8" fill="#1e293b" stroke="#fbbf24" stroke-width="1.5"/>
+      <text x="560" y="362" text-anchor="middle" fill="#fbbf24" font-size="12" font-weight="bold" font-family="Segoe UI">耳溫槍 x6</text>
+      <text x="560" y="378" text-anchor="middle" fill="#94a3b8" font-size="10" font-family="Segoe UI">Bluetooth RFCOMM SPP</text>
+
+      <!-- Arrows -->
+      <line x1="140" y1="210" x2="228" y2="210" stroke="#a78bfa" stroke-width="2" marker-end="url(#arr)"/>
+      <text x="184" y="200" text-anchor="middle" fill="#94a3b8" font-size="9" font-family="Segoe UI">TCP</text>
+      <line x1="228" y1="210" x2="140" y2="210" stroke="#a78bfa" stroke-width="2" stroke-dasharray="4,3"/>
+
+      <line x1="392" y1="210" x2="478" y2="210" stroke="#4ade80" stroke-width="2" marker-end="url(#arr2)"/>
+      <text x="435" y="200" text-anchor="middle" fill="#94a3b8" font-size="9" font-family="Segoe UI">TCP 5001</text>
+      <line x1="478" y1="220" x2="392" y2="220" stroke="#4ade80" stroke-width="2" stroke-dasharray="4,3" marker-end="url(#arr2)"/>
+
+      <line x1="310" y1="292" x2="310" y2="338" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#arr3)"/>
+      <line x1="560" y1="292" x2="560" y2="338" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#arr3)"/>
+
+      <!-- 圖例 -->
+      <rect x="20" y="20" width="200" height="90" rx="8" fill="rgba(30,41,59,0.8)" stroke="#334155"/>
+      <text x="30" y="40" fill="#94a3b8" font-size="10" font-weight="bold" font-family="Segoe UI">圖例</text>
+      <line x1="30" y1="55" x2="60" y2="55" stroke="#a78bfa" stroke-width="2"/>
+      <text x="65" y="59" fill="#94a3b8" font-size="10" font-family="Segoe UI">PLC MC Protocol (TCP)</text>
+      <line x1="30" y1="72" x2="60" y2="72" stroke="#4ade80" stroke-width="2"/>
+      <text x="65" y="76" fill="#94a3b8" font-size="10" font-family="Segoe UI">Master-Slave TCP</text>
+      <line x1="30" y1="89" x2="60" y2="89" stroke="#fbbf24" stroke-width="1.5"/>
+      <text x="65" y="93" fill="#94a3b8" font-size="10" font-family="Segoe UI">Bluetooth RFCOMM</text>
+
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 Z" fill="#a78bfa"/></marker>
+        <marker id="arr2" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 Z" fill="#4ade80"/></marker>
+        <marker id="arr3" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 Z" fill="#fbbf24"/></marker>
+      </defs>
+    </svg>
+  </div>
+
+  <h3>軟體模組</h3>
+  <table>
+    <tr><th>模組</th><th>檔案</th><th>功能</th></tr>
+    <tr><td class="bold c-accent">主程式 / UI</td><td><code>main.py</code></td><td>NiceGUI 介面、事件處理、異常偵測</td></tr>
+    <tr><td class="bold c-yellow">藍芽通訊</td><td><code>bluetooth_comm.py</code></td><td>RFCOMM SPP 連線、封包解析、自動重連</td></tr>
+    <tr><td class="bold c-purple">PLC 通訊</td><td><code>plc_comm.py</code></td><td>三菱 MC Protocol 3E、讀寫 D 暫存器</td></tr>
+    <tr><td class="bold c-green">網路通訊</td><td><code>network_comm.py</code></td><td>Master-Slave TCP 同步、指令與資料傳輸</td></tr>
+    <tr><td class="bold c-orange">量測邏輯</td><td><code>measurement.py</code></td><td>PASS/FAIL 判定、CSV 批次記錄</td></tr>
+    <tr><td class="bold c-dim">設定管理</td><td><code>config.py</code></td><td>JSON 設定檔讀寫、參數定義</td></tr>
+  </table>
+
+  <h3>Master vs Slave 差異</h3>
+  <table>
+    <tr><th>功能</th><th><span class="tag master">MASTER</span></th><th><span class="tag slave">SLAVE</span></th></tr>
+    <tr><td>管理通道</td><td>CH1, CH3, CH5, CH7, CH9, CH11</td><td>CH2, CH4, CH6, CH8, CH10, CH12</td></tr>
+    <tr><td>PLC 通訊</td><td class="c-green">有</td><td class="c-dim">無</td></tr>
+    <tr><td>量測判定</td><td class="c-green">完整 PASS/FAIL 判定</td><td class="c-dim">僅收集資料轉發</td></tr>
+    <tr><td>CSV 記錄</td><td class="c-green">有（批次檔）</td><td class="c-dim">無</td></tr>
+    <tr><td>異常偵測</td><td class="c-green">全面偵測</td><td class="c-dim">僅藍芽狀態</td></tr>
+    <tr><td>手動觸發</td><td class="c-green">有按鈕</td><td class="c-dim">無</td></tr>
+    <tr><td>OK/NG 計數</td><td class="c-green">顯示 &amp; 寫入 PLC</td><td class="c-dim">不顯示</td></tr>
+    <tr><td>Web UI Port</td><td>8080</td><td>8081</td></tr>
+  </table>
+</section>
+
+<!-- ==================== 3. 啟動與關閉 ==================== -->
+<section class="page-section" id="startup">
+  <h2>啟動與關閉</h2>
+
+  <h3>啟動前準備</h3>
+  <div class="card warn">
+    <div class="card-title c-orange">啟動前確認清單</div>
+    <ul>
+      <li>確認電腦的 <strong>藍芽</strong> 已開啟，且 12 支耳溫槍已開機</li>
+      <li>確認 <strong>PLC</strong> 已上電且網路線已連接（Master 端）</li>
+      <li>確認 Master 與 Slave 兩台電腦在同一網段，可互相 ping 通</li>
+      <li>確認 <code>config.json</code> 中的 IP 位址、MAC 位址正確</li>
+    </ul>
+  </div>
+
+  <h3>啟動程式</h3>
+  <ol class="steps">
+    <li>
+      <strong>先啟動 Slave</strong>（建議）<br>
+      執行 <code>python main.py</code> 或雙擊捷徑<br>
+      <span class="c-dim">Slave 會在 Port 8081 等待 Master 連入</span>
+    </li>
+    <li>
+      <strong>再啟動 Master</strong><br>
+      執行 <code>python main.py</code> 或雙擊捷徑<br>
+      <span class="c-dim">Master 會在 Port 8080 開啟 UI，並主動連線到 Slave</span>
+    </li>
+    <li>
+      <strong>確認連線狀態</strong><br>
+      等待畫面頂部的 PLC 與網路指示燈變成 <span class="status-dot green"></span> 綠色<br>
+      各通道的 BT 圖示也應逐步變成 <span class="status-dot blue"></span> 藍色
+    </li>
+    <li>
+      <strong>系統就緒</strong><br>
+      畫面右上方顯示「<span class="c-green bold">運行中</span>」即表示系統已準備好接收 PLC 觸發
+    </li>
+  </ol>
+
+  <h3>關閉程式</h3>
+  <div class="card">
+    <p>直接關閉視窗即可。系統會自動執行以下清理動作：</p>
+    <ul>
+      <li>關閉所有藍芽 Socket 連線</li>
+      <li>停止 PLC 監控</li>
+      <li>斷開 Master-Slave 網路</li>
+    </ul>
+  </div>
+  <div class="card danger">
+    <div class="card-title c-red">注意事項</div>
+    <p>關閉 Master 前，建議先確認目前無正在進行的量測流程（量測狀態為「待機中」）。若在量測過程中強制關閉，該筆資料可能不會寫入 CSV。</p>
+  </div>
+</section>
+
+<!-- ==================== 4. 主畫面介紹 ==================== -->
+<section class="page-section" id="ui-overview">
+  <h2>主畫面介紹</h2>
+  <p>主畫面由上而下分為四大區域：</p>
+
+  <h3>A. 頂部資訊列</h3>
+  <div class="card">
+    <table>
+      <tr><th style="width:140px">元件</th><th>說明</th></tr>
+      <tr><td class="bold">系統標題</td><td>顯示「擎添耳溫槍探頭套檢測系統」與版本號</td></tr>
+      <tr><td class="bold">模式徽章</td><td><span class="tag master">MASTER</span> 藍色 或 <span class="tag slave">SLAVE</span> 橘色</td></tr>
+      <tr><td class="bold">目前批次</td><td><span class="tag master">MASTER</span> 顯示目前 CSV 批次檔名（如 <code>20260312100000.csv</code>）</td></tr>
+      <tr><td class="bold">換批按鈕</td><td><span class="tag master">MASTER</span> 點擊建立新 CSV 批次並歸零 PLC OK/NG 計數</td></tr>
+      <tr><td class="bold">測試週期</td><td><span class="tag master">MASTER</span> 顯示 PLC D516 的測試計數值</td></tr>
+      <tr><td class="bold">系統狀態</td><td><span class="c-green">運行中</span> 或 <span class="c-red">已停止</span></td></tr>
+      <tr><td class="bold">判定模式</td><td><span class="tag master">MASTER</span> 正常判定 / 強制OK / 強制NG</td></tr>
+      <tr><td class="bold">暖槍狀態</td><td><span class="tag master">MASTER</span> 讀取 PLC D542，顯示 <span class="c-orange">暖槍中</span> 或 <span class="c-dim">OFF</span></td></tr>
+      <tr><td class="bold">PLC 指示燈</td><td><span class="status-dot green"></span> 已連線 / <span class="status-dot yellow"></span> 連線中 / <span class="status-dot red"></span> 斷線</td></tr>
+      <tr><td class="bold">網路指示燈</td><td>同上，顯示 Master-Slave 網路連線狀態</td></tr>
+      <tr><td class="bold">異常復歸</td><td><span class="tag master">MASTER</span> 按鈕，清除所有異常狀態與警報</td></tr>
+      <tr><td class="bold">設定齒輪</td><td>開啟右側進階設定面板</td></tr>
+    </table>
+  </div>
+
+  <h3>B. 警報橫幅</h3>
+  <div class="card danger">
+    <p>平時隱藏。當發生異常時會出現<strong>紅色閃爍橫幅</strong>，顯示警報訊息，右側有「確認」按鈕可關閉橫幅。警報內容會同時記錄到 <code>D:\logs\Alarm\</code> 下的 CSV 檔。</p>
+  </div>
+
+  <h3>C. 通道量測區</h3>
+  <p><span class="tag master">MASTER</span> 畫面有兩張卡片：「本機通道」和「Slave 通道」。<span class="tag slave">SLAVE</span> 只有一張「本機通道」。</p>
+  <div class="card">
+    <p>每一列（每一通道）的欄位說明：</p>
+    <table>
+      <tr><th>欄位</th><th>說明</th></tr>
+      <tr><td class="bold">CH 名稱</td><td>通道編號（如 CH11），停用通道會顯示紅色「停用」標籤</td></tr>
+      <tr><td class="bold">BT 圖示</td><td>
+        <span class="status-dot blue"></span> 已連線 &nbsp;
+        <span class="status-dot yellow"></span> 連線中 &nbsp;
+        <span class="status-dot red"></span> 錯誤 &nbsp;
+        <span class="status-dot gray"></span> 未連線
+      </td></tr>
+      <tr><td class="bold">耳套</td><td>
+        <span class="c-green">有</span> = 有耳溫套 (1111) &nbsp;
+        <span class="c-red">無</span> = 無耳溫套 (0000) &nbsp;
+        <span class="c-dim">--</span> = 尚無資料
+      </td></tr>
+      <tr><td class="bold c-accent">空槍值</td><td>青色數字，空槍量測時記錄的基準溫度</td></tr>
+      <tr><td class="bold c-yellow">量測值</td><td>黃色數字，溫度量測時的實際溫度</td></tr>
+      <tr><td class="bold c-white">誤差</td><td>白色數字，= 量測值 - 空槍值</td></tr>
+      <tr><td class="bold">狀態</td><td>
+        <span class="status-dot gray"></span> <span class="c-dim">WAIT</span> 等待 &nbsp;
+        <span class="status-dot green"></span> <span class="c-green">PASS</span> 合格 &nbsp;
+        <span class="status-dot red"></span> <span class="c-red">FAIL</span> 不合格
+      </td></tr>
+      <tr><td class="bold c-green">OK</td><td><span class="tag master">MASTER</span> 累計合格次數（對應 PLC D517~D528）</td></tr>
+      <tr><td class="bold c-red">NG</td><td><span class="tag master">MASTER</span> 累計不合格次數（對應 PLC D529~D540）</td></tr>
+      <tr><td class="bold c-orange">無套</td><td><span class="tag master">MASTER</span> 連續無耳溫套計數，超過門檻時變橘色</td></tr>
+    </table>
+  </div>
+
+  <h3>D. 下方面板</h3>
+  <div class="card">
+    <table>
+      <tr><th style="width:140px">面板</th><th>說明</th></tr>
+      <tr><td class="bold">目前設定</td><td>顯示誤差上下限、空槍值上下限</td></tr>
+      <tr><td class="bold">量測流程</td><td>顯示目前量測狀態（待機中、等待空槍、空槍完成、等待量測、計算中、量測完成），附「清空 Log」按鈕</td></tr>
+      <tr><td class="bold">手動觸發</td><td><span class="tag master">MASTER</span>「空槍量測」和「溫度量測」按鈕，可手動觸發量測流程</td></tr>
+      <tr><td class="bold">PLC 監控</td><td><span class="tag master">MASTER</span> 即時顯示所有 D 暫存器狀態值</td></tr>
+      <tr><td class="bold">系統 Log</td><td>滾動式訊息記錄，最多顯示 100 行，顯示所有系統事件</td></tr>
+    </table>
+  </div>
+</section>
+
+<!-- ==================== 5. 量測流程 ==================== -->
+<section class="page-section" id="measure-flow">
+  <h2>量測流程</h2>
+  <p>每次完整量測包含兩個階段：<strong>空槍量測</strong>（記錄基準值）→ <strong>溫度量測</strong>（記錄實測值並判定）。</p>
+
+  <h3>流程總覽</h3>
+  <div class="flow">
+    <div class="flow-node start">PLC 發送 D515=1（空槍觸發）<br><span class="c-dim" style="font-size:0.82rem">或手動按「空槍量測」</span></div>
+    <div class="flow-arrow">&#8595;</div>
+    <div class="flow-node action">Master 通知 Slave：request_empty</div>
+    <div class="flow-arrow">&#8595;</div>
+    <div class="flow-node action">所有通道同時發送 CD 指令（要求耳溫槍量測）</div>
+    <div class="flow-arrow">&#8595; <span class="lbl">等待 empty_collect_delay 秒</span></div>
+    <div class="flow-node action">收集空槍值 → 記錄到 CSV → 清除 D515</div>
+    <div class="flow-arrow">&#8595; <span class="lbl">空槍值檢查（上下限）</span></div>
+    <div class="flow-node ok" style="border-color:var(--accent)">量測狀態：<span class="c-accent bold">空槍完成</span></div>
+    <div class="flow-arrow">&#8595;</div>
+    <div class="flow-node start">PLC 發送 D500=1（量測觸發）<br><span class="c-dim" style="font-size:0.82rem">或手動按「溫度量測」</span></div>
+    <div class="flow-arrow">&#8595;</div>
+    <div class="flow-node action">Master 通知 Slave：request_measure</div>
+    <div class="flow-arrow">&#8595;</div>
+    <div class="flow-node action">所有通道同時發送 CD 指令</div>
+    <div class="flow-arrow">&#8595; <span class="lbl">等待 measure_collect_delay 秒</span></div>
+    <div class="flow-node action">收集量測值 + 異常偵測（溫度異常、連續無套）</div>
+    <div class="flow-arrow">&#8595;</div>
+    <div class="flow-node decide">計算誤差 = 量測值 - 空槍值<br>誤差下限 &le; 誤差 &le; 誤差上限？</div>
+    <div class="flow-arrow">&#8595;</div>
+    <div class="flow-split">
+      <div class="flow-node ok" style="text-align:center">
+        <span class="c-green bold">PASS</span><br>
+        <span style="font-size:0.82rem">D50x = 2</span>
+      </div>
+      <div class="flow-node ng" style="text-align:center">
+        <span class="c-red bold">FAIL</span><br>
+        <span style="font-size:0.82rem">D50x = 1</span>
+      </div>
+    </div>
+    <div class="flow-arrow">&#8595;</div>
+    <div class="flow-node action">寫入判定結果到 PLC D501~D512<br>更新 OK/NG 計數 → 記錄到 CSV → 清除 D500</div>
+    <div class="flow-arrow">&#8595;</div>
+    <div class="flow-node ok" style="border-color:var(--accent)">量測狀態：<span class="c-green bold">量測完成</span></div>
+  </div>
+
+  <h3>判定公式</h3>
+  <div class="card highlight">
+    <p><strong>誤差</strong> = 量測值 - 空槍值</p>
+    <p>判定條件：<code>-|誤差下限| &le; 誤差 &le; +|誤差上限|</code></p>
+    <ul>
+      <li>符合 → <span class="c-green bold">PASS</span>（PLC 寫入 2）</li>
+      <li>不符合 → <span class="c-red bold">FAIL</span>（PLC 寫入 1）</li>
+      <li>通道停用 → 不判定（PLC 寫入 0）</li>
+    </ul>
+    <p class="c-dim" style="font-size:0.85rem">例：誤差上限 = 0.30，誤差下限 = 0.50 → 合格範圍 = -0.50 ~ +0.30</p>
+  </div>
+
+  <h3>判定模式</h3>
+  <table>
+    <tr><th>模式</th><th>行為</th><th>用途</th></tr>
+    <tr><td class="c-green bold">正常判定</td><td>依公式判定 PASS/FAIL</td><td>正式生產使用</td></tr>
+    <tr><td class="c-yellow bold">強制 OK</td><td>不論誤差值，全部判定為 PASS</td><td>系統測試 / 暖機用</td></tr>
+    <tr><td class="c-red bold">強制 NG</td><td>不論誤差值，全部判定為 FAIL</td><td>系統測試用</td></tr>
+  </table>
+
+  <h3>手動觸發</h3>
+  <div class="card">
+    <p><span class="tag master">MASTER</span> 畫面下方有「手動觸發」面板，提供兩個按鈕：</p>
+    <ul>
+      <li><strong class="c-accent">空槍量測</strong> — 等同 PLC D515=1 觸發（如果 PLC 已連線，會先寫入 D515 再由 PLC 回送觸發）</li>
+      <li><strong class="c-orange">溫度量測</strong> — 等同 PLC D500=1 觸發</li>
+    </ul>
+    <p class="c-dim">注意：手動觸發主要用於調試和無 PLC 環境下測試，正式生產以 PLC 觸發為主。</p>
+  </div>
+</section>
+
+<!-- ==================== 6. 批次與記錄 ==================== -->
+<section class="page-section" id="batch">
+  <h2>批次與記錄</h2>
+
+  <h3>量測 CSV 批次檔</h3>
+  <div class="card">
+    <div class="card-title c-accent">檔案位置</div>
+    <p><code>D:\logs\{時間戳}.csv</code></p>
+    <p>每個批次一個檔案，檔名為建立時的時間戳記（例：<code>20260312143025.csv</code>）</p>
+  </div>
+
+  <h4>CSV 欄位結構（54 欄）</h4>
+  <table>
+    <tr><th>欄位範圍</th><th>內容</th><th>說明</th></tr>
+    <tr><td>A 欄</td><td>種類</td><td><code>empty</code> = 空槍 / <code>{D516值}</code> = 量測</td></tr>
+    <tr><td>B ~ M 欄</td><td>scan1 ~ scan12</td><td>12 通道溫度值（對應 CH1~CH12）</td></tr>
+    <tr><td>N 欄</td><td>Time</td><td>量測時間 <code>YYYY/MM/DD HH:MM:SS</code></td></tr>
+    <tr><td>O ~ P 欄</td><td>誤差上/下限</td><td>本次使用的判定設定</td></tr>
+    <tr><td>Q ~ AB 欄</td><td>scan1~12 cover</td><td>耳套狀態 (1111/0000)</td></tr>
+    <tr><td>AC ~ AN 欄</td><td>scan1~12 OK</td><td>各通道 OK 累計次數</td></tr>
+    <tr><td>AO ~ AZ 欄</td><td>scan1~12 NG</td><td>各通道 NG 累計次數</td></tr>
+    <tr><td>BA ~ BB 欄</td><td>TOTAL OK / NG</td><td>全通道 OK/NG 加總</td></tr>
+  </table>
+
+  <h3>換批操作</h3>
+  <div class="card">
+    <ol>
+      <li>確認目前量測狀態為「待機中」</li>
+      <li>點擊頂部的「<strong>換批</strong>」按鈕</li>
+      <li>系統會自動建立新 CSV 檔案，並將 PLC 的 OK/NG 計數（D517~D540）全部歸零</li>
+      <li>頂部批次檔名會更新為新檔名</li>
+    </ol>
+  </div>
+
+  <h3>異常記錄（Alarm CSV）</h3>
+  <div class="card">
+    <div class="card-title c-red">檔案位置</div>
+    <p><code>D:\logs\Alarm\alarm_{日期}.csv</code>（每天一個檔案）</p>
+    <table>
+      <tr><th>欄位</th><th>說明</th></tr>
+      <tr><td>日期時間</td><td>YYYY-MM-DD HH:MM:SS</td></tr>
+      <tr><td>異常類型</td><td>藍芽斷線 / 溫度異常 / 連續無套 / PLC異常 / 網路異常 / 通道不一致 / 空槍異常</td></tr>
+      <tr><td>詳細內容</td><td>具體的異常描述</td></tr>
+    </table>
+    <p class="c-dim">如果檔案被 Excel 鎖定，系統會自動寫入備用檔案 <code>alarm_{日期}_1.csv</code></p>
+  </div>
+
+  <h3>Debug 記錄</h3>
+  <div class="card">
+    <p>系統 Log 同步寫入 <code>logs/debug_{日期}_{時間}.txt</code>，包含所有 console 輸出，用於後續排查問題。</p>
+  </div>
+</section>
+
+<!-- ==================== 7. 異常警報處理 ==================== -->
+<section class="page-section" id="alarm">
+  <h2>異常警報處理</h2>
+  <p>系統會自動偵測多種異常，並在畫面上方顯示紅色閃爍橫幅。所有異常都會記錄到 Alarm CSV。</p>
+
+  <h3>異常類型一覽</h3>
+
+  <div class="card danger">
+    <div class="card-title"><span class="c-accent" style="font-size:1.1rem">&#128246;</span> 藍芽斷線</div>
+    <table>
+      <tr><td style="width:80px" class="bold">觸發條件</td><td>任何啟用通道的藍芽狀態變為 DISCONNECTED 或 ERROR</td></tr>
+      <tr><td class="bold">影響</td><td>PLC D513 對應位元設為 1，該通道無法收集量測數據</td></tr>
+      <tr><td class="bold">處理方式</td><td>系統會自動重連（漸進式冷卻），正常情況下等待即可恢復。<br>若持續斷線，請檢查耳溫槍電源與藍芽配對</td></tr>
+      <tr><td class="bold">自動恢復</td><td>重新連線後自動清除警報與 D513 位元</td></tr>
+    </table>
+  </div>
+
+  <div class="card danger">
+    <div class="card-title"><span class="c-red" style="font-size:1.1rem">&#127777;</span> 溫度異常</div>
+    <table>
+      <tr><td style="width:80px" class="bold">觸發條件</td><td>量測溫度超出設定範圍（溫度異常上限 ~ 下限），需開啟「溫度異常」開關</td></tr>
+      <tr><td class="bold">影響</td><td>PLC D513 bit12 設為 1，異常通道列變紅色高亮</td></tr>
+      <tr><td class="bold">處理方式</td><td>檢查耳溫槍感應器是否正常，或環境溫度是否影響量測</td></tr>
+      <tr><td class="bold">自動恢復</td><td>下次量測所有通道恢復正常範圍時自動解除</td></tr>
+    </table>
+  </div>
+
+  <div class="card danger">
+    <div class="card-title"><span class="c-orange" style="font-size:1.1rem">&#128683;</span> 連續無套</div>
+    <table>
+      <tr><td style="width:80px" class="bold">觸發條件</td><td>同一通道連續 N 次偵測到「無耳溫套」(0000)，需開啟「連續無套」開關</td></tr>
+      <tr><td class="bold">影響</td><td>PLC D513 bit13 設為 1，無套計數欄變橘色</td></tr>
+      <tr><td class="bold">處理方式</td><td>確認探頭套是否正確安裝</td></tr>
+      <tr><td class="bold">自動恢復</td><td>偵測到有耳溫套 (1111) 時，該通道計數歸零</td></tr>
+    </table>
+  </div>
+
+  <div class="card danger">
+    <div class="card-title"><span class="c-yellow" style="font-size:1.1rem">&#9888;</span> 空槍值超限</div>
+    <table>
+      <tr><td style="width:80px" class="bold">觸發條件</td><td>空槍量測值超出空槍上限/下限範圍</td></tr>
+      <tr><td class="bold">影響</td><td>PLC D513 bit14 設為 1；暖槍中（D542=1）時容忍前 2 次，第 3 次才發警報</td></tr>
+      <tr><td class="bold">處理方式</td><td>確認耳溫槍是否正常，可能需要繼續暖機</td></tr>
+    </table>
+  </div>
+
+  <div class="card danger">
+    <div class="card-title"><span class="c-purple" style="font-size:1.1rem">&#128268;</span> PLC / 網路異常</div>
+    <table>
+      <tr><td style="width:80px" class="bold">觸發條件</td><td>PLC 連線中斷 或 Master-Slave 網路斷線</td></tr>
+      <tr><td class="bold">處理方式</td><td>檢查網路線、IP 設定、防火牆規則</td></tr>
+      <tr><td class="bold">自動恢復</td><td>重新連線後自動恢復</td></tr>
+    </table>
+  </div>
+
+  <h3>異常復歸操作</h3>
+  <div class="card success">
+    <div class="card-title c-green">手動復歸</div>
+    <p>點擊畫面右上方的「<strong>異常復歸</strong>」按鈕（黃色），將執行以下動作：</p>
+    <ul>
+      <li>清除 PLC D513 所有位元（異常掩碼歸零）</li>
+      <li>重置溫度異常與連續無套狀態</li>
+      <li>清除所有通道的無套計數</li>
+      <li>移除通道紅色高亮</li>
+      <li>隱藏警報橫幅</li>
+    </ul>
+    <p class="c-dim">PLC D541 升沿也會觸發相同的復歸動作。</p>
+  </div>
+</section>
+
+<!-- ==================== 8. 進階設定面板 ==================== -->
+<section class="page-section" id="settings">
+  <h2>進階設定面板</h2>
+  <p>點擊右上角的齒輪圖示 &#9881; 開啟右側設定面板。</p>
+
+  <h3>密碼保護</h3>
+  <div class="card warn">
+    <p>部分設定需要管理密碼才能修改。輸入密碼後點擊「登入」即可解鎖。</p>
+    <p class="c-dim">登出後設定區域會重新隱藏，防止未授權修改。</p>
+  </div>
+
+  <h3>設定項目一覽</h3>
+
+  <h4>系統設定（需登入）</h4>
+  <table>
+    <tr><th>設定項</th><th>說明</th><th>預設值</th></tr>
+    <tr><td class="bold">誤差上限</td><td>PASS/FAIL 判定的正向容許誤差</td><td>+0.50 °C</td></tr>
+    <tr><td class="bold">誤差下限</td><td>PASS/FAIL 判定的負向容許誤差</td><td>-0.50 °C</td></tr>
+    <tr><td class="bold">空槍上限</td><td>空槍值的合理上限，超出會發警報</td><td>40.0 °C</td></tr>
+    <tr><td class="bold">空槍下限</td><td>空槍值的合理下限</td><td>20.0 °C</td></tr>
+    <tr><td class="bold">判定模式</td><td>正常 / 強制OK / 強制NG</td><td>正常</td></tr>
+    <tr><td class="bold">溫度異常開關</td><td>啟用後需設定溫度上下限</td><td>關閉</td></tr>
+    <tr><td class="bold">連續無套開關</td><td>啟用後需設定觸發次數</td><td>關閉</td></tr>
+    <tr><td class="bold">運行模式</td><td>master 或 slave（修改後需重啟程式）</td><td>master</td></tr>
+  </table>
+
+  <h4>網路設定（需登入）</h4>
+  <table>
+    <tr><th>設定項</th><th>說明</th><th>預設值</th></tr>
+    <tr><td class="bold">Master IP</td><td>Slave 連入的 Master IP 位址</td><td>192.168.1.100</td></tr>
+    <tr><td class="bold">Port</td><td>Master-Slave TCP 通訊埠</td><td>5001</td></tr>
+  </table>
+
+  <h4>時序設定（需登入，僅 Master）</h4>
+  <table>
+    <tr><th>設定項</th><th>說明</th><th>預設值</th></tr>
+    <tr><td class="bold">空槍收集延遲</td><td>發送量測指令後等待多久收集空槍資料</td><td>0.5 秒</td></tr>
+    <tr><td class="bold">量測收集延遲</td><td>發送量測指令後等待多久收集量測資料</td><td>0.5 秒</td></tr>
+  </table>
+
+  <h4>PLC 設定（需登入，僅 Master）</h4>
+  <table>
+    <tr><th>設定項</th><th>說明</th><th>預設值</th></tr>
+    <tr><td class="bold">IP 位址</td><td>PLC FX5U 的 IP</td><td>192.168.1.10</td></tr>
+    <tr><td class="bold">Port</td><td>PLC 通訊埠</td><td>5000</td></tr>
+  </table>
+
+  <h4>藍芽設定（不需登入）</h4>
+  <table>
+    <tr><th>設定項</th><th>說明</th><th>預設值</th></tr>
+    <tr><td class="bold">CH MAC 位址</td><td>各通道對應耳溫槍的藍芽 MAC 位址</td><td>（空白）</td></tr>
+    <tr><td class="bold">重連間隔</td><td>每輪重連後的固定等待時間</td><td>5.0 秒</td></tr>
+    <tr><td class="bold">超時</td><td>單次 socket.connect() 的最長等待時間</td><td>10.0 秒</td></tr>
+  </table>
+
+  <h4>通道啟用（不需登入）</h4>
+  <div class="card">
+    <p>以開關方式控制每個通道的啟用/停用。停用的通道：</p>
+    <ul>
+      <li>不參與量測與判定</li>
+      <li>不發送藍芽量測指令</li>
+      <li>不會觸發藍芽斷線警報</li>
+      <li>PLC 寫入 0（不使用）</li>
+      <li>UI 上會半透明顯示</li>
+    </ul>
+  </div>
+
+  <h3>儲存 vs 即時套用</h3>
+  <div class="card">
+    <table>
+      <tr><th>按鈕</th><th>行為</th></tr>
+      <tr><td class="bold c-accent">儲存進階設定</td><td>將設定寫入 <code>config.json</code>，重啟後仍有效。部分參數需重啟才生效（如運行模式）</td></tr>
+      <tr><td class="bold c-green">更新資料（即時套用）</td><td>儲存 + 立即套用到所有執行中的管理器。<strong>不需重啟程式</strong>，包括：誤差範圍、通道啟用、藍芽 MAC、PLC IP/Port、網路參數、時序參數</td></tr>
+    </table>
+  </div>
+</section>
+
+<!-- ==================== 9. 藍芽連線管理 ==================== -->
+<section class="page-section" id="bluetooth">
+  <h2>藍芽連線管理</h2>
+  <p>系統使用 Windows 原生藍芽 RFCOMM 協定，透過 SPP (Serial Port Profile) 與耳溫槍通訊。</p>
+
+  <h3>連線流程</h3>
+  <div class="flow">
+    <div class="flow-node start">BluetoothManager 啟動</div>
+    <div class="flow-arrow">&#8595;</div>
+    <div class="flow-node action">藍芽堆疊暖機（探測連線 3 秒）</div>
+    <div class="flow-arrow">&#8595;</div>
+    <div class="flow-node action">所有啟用通道 <strong>同時並行連線</strong><br><span class="c-dim" style="font-size:0.82rem">每通道一條 Thread，最多等 connect_timeout 秒</span></div>
+    <div class="flow-arrow">&#8595;</div>
+    <div class="flow-node decide">進入監控迴圈</div>
+    <div class="flow-arrow">&#8595;</div>
+    <div class="flow-node action">偵測斷線通道 → 同時重連<br><span class="c-dim" style="font-size:0.82rem">每輪間隔 reconnect_interval 秒</span></div>
+    <div class="flow-arrow">&#8595; <span class="lbl">連續失敗 &ge; 3 次</span></div>
+    <div class="flow-node ng">啟用漸進式冷卻<br><span style="font-size:0.85rem"><code>min(失敗次數 &times; 5, 30)</code> 秒</span></div>
+  </div>
+
+  <h3>三個關鍵時間參數</h3>
+  <table>
+    <tr><th>參數</th><th>預設值</th><th>作用</th></tr>
+    <tr>
+      <td class="bold c-orange">connect_timeout</td>
+      <td>10 秒</td>
+      <td>單次 socket.connect() 最長等待。超時即視為連線失敗</td>
+    </tr>
+    <tr>
+      <td class="bold c-accent">reconnect_interval</td>
+      <td>5 秒</td>
+      <td>每輪重連嘗試後的固定等待間隔</td>
+    </tr>
+    <tr>
+      <td class="bold c-purple">cooldown（冷卻）</td>
+      <td>min(n&times;5, 30) 秒</td>
+      <td>連續失敗 &ge; 3 次後的額外等待，第 6 次以上固定 30 秒</td>
+    </tr>
+  </table>
+
+  <h4>冷卻時間對照</h4>
+  <table>
+    <tr><th>連續失敗</th><th>冷卻</th><th>單輪最長等待</th></tr>
+    <tr><td>第 1~2 次</td><td class="c-green">0 秒（立即重試）</td><td>10 + 5 = 15 秒</td></tr>
+    <tr><td>第 3 次</td><td class="c-purple">15 秒</td><td>10 + 5 + 15 = 30 秒</td></tr>
+    <tr><td>第 4 次</td><td class="c-purple">20 秒</td><td>10 + 5 + 20 = 35 秒</td></tr>
+    <tr><td>第 5 次</td><td class="c-purple">25 秒</td><td>10 + 5 + 25 = 40 秒</td></tr>
+    <tr><td>第 6 次以上</td><td class="c-red bold">30 秒（上限）</td><td>10 + 5 + 30 = 45 秒</td></tr>
+  </table>
+
+  <h3>BT 圖示顏色對照</h3>
+  <table>
+    <tr><td><span class="status-dot blue"></span> <strong>藍色</strong></td><td>CONNECTED — 已連線，可正常收發資料</td></tr>
+    <tr><td><span class="status-dot yellow"></span> <strong>黃色</strong></td><td>CONNECTING — 正在嘗試連線</td></tr>
+    <tr><td><span class="status-dot red"></span> <strong>紅色</strong></td><td>ERROR — 連線失敗或異常斷開</td></tr>
+    <tr><td><span class="status-dot gray"></span> <strong>灰色</strong></td><td>DISCONNECTED — 未連線</td></tr>
+  </table>
+</section>
+
+<!-- ==================== 10. PLC 通訊 ==================== -->
+<section class="page-section" id="plc">
+  <h2>PLC 通訊</h2>
+  <p><span class="tag master">MASTER</span> 透過 MC Protocol 3E (TCP) 與三菱 FX5U PLC 通訊。</p>
+
+  <h3>PLC 監控面板</h3>
+  <div class="card">
+    <p>位於畫面左下方，即時顯示 D500~D542 暫存器的值：</p>
+    <table>
+      <tr><th>暫存器</th><th>名稱</th><th>方向</th><th>說明</th></tr>
+      <tr><td><code>D500</code></td><td>量測觸發</td><td>PLC→HMI</td><td>升沿(0→1)觸發溫度量測</td></tr>
+      <tr><td><code>D501~D512</code></td><td>判定結果</td><td>HMI→PLC</td><td>0=不使用, 1=FAIL, 2=PASS</td></tr>
+      <tr><td><code>D513</code></td><td>異常掩碼</td><td>HMI→PLC</td><td>bit0~11:藍芽, bit12:溫度, bit13:無套, bit14:空槍</td></tr>
+      <tr><td><code>D514</code></td><td>PC 心跳</td><td>HMI→PLC</td><td>0/1 每秒交替，PLC 可偵測 HMI 是否存活</td></tr>
+      <tr><td><code>D515</code></td><td>空槍觸發</td><td>PLC→HMI</td><td>升沿觸發空槍量測</td></tr>
+      <tr><td><code>D516</code></td><td>測試週期</td><td>PLC→HMI</td><td>累計測試次數</td></tr>
+      <tr><td><code>D517~D528</code></td><td>OK 計數</td><td>HMI→PLC</td><td>CH1~CH12 各通道合格次數</td></tr>
+      <tr><td><code>D529~D540</code></td><td>NG 計數</td><td>HMI→PLC</td><td>CH1~CH12 各通道不合格次數</td></tr>
+      <tr><td><code>D541</code></td><td>異常復歸</td><td>PLC→HMI</td><td>升沿觸發異常復歸</td></tr>
+      <tr><td><code>D542</code></td><td>暖槍訊號</td><td>PLC→HMI</td><td>0=正常, 1=暖槍中</td></tr>
+    </table>
+  </div>
+
+  <h3>D513 異常掩碼詳解</h3>
+  <div class="card">
+    <table>
+      <tr><th>位元</th><th>內容</th></tr>
+      <tr><td>bit 0 ~ 11</td><td>CH1~CH12 藍芽連線異常（對應各通道）</td></tr>
+      <tr><td>bit 12</td><td>溫度異常（任一通道超出設定範圍）</td></tr>
+      <tr><td>bit 13</td><td>連續無套異常</td></tr>
+      <tr><td>bit 14</td><td>空槍值超限異常</td></tr>
+    </table>
+    <p class="c-dim">PLC 監控面板以十六進位顯示（如 <code>0x0004</code> = bit2 = CH3 藍芽斷線）。</p>
+  </div>
+</section>
+
+<!-- ==================== 11. Master-Slave 網路 ==================== -->
+<section class="page-section" id="network">
+  <h2>Master-Slave 網路</h2>
+  <p>系統使用 TCP 在 Master 與 Slave 之間同步資料與指令。</p>
+
+  <h3>角色分工</h3>
+  <table>
+    <tr><th>項目</th><th><span class="tag master">MASTER</span></th><th><span class="tag slave">SLAVE</span></th></tr>
+    <tr><td>TCP 角色</td><td>Server（監聽 Port 5001）</td><td>Client（連線到 Master IP）</td></tr>
+    <tr><td>啟動順序</td><td>建議後啟動</td><td>建議先啟動</td></tr>
+    <tr><td>發送指令</td><td>request_empty / request_measure / sync_bt_status</td><td>無</td></tr>
+    <tr><td>發送資料</td><td>無</td><td>各通道溫度 + 藍芽狀態 + 耳套狀態</td></tr>
+  </table>
+
+  <h3>資料流</h3>
+  <div class="flow">
+    <div class="flow-node start" style="border-color:var(--green)">Master 發送指令（如 request_measure）</div>
+    <div class="flow-arrow">&#8595;</div>
+    <div class="flow-node action">Slave 收到指令 → 執行藍芽量測</div>
+    <div class="flow-arrow">&#8595;</div>
+    <div class="flow-node action">Slave 收到耳溫槍回傳資料</div>
+    <div class="flow-arrow">&#8595;</div>
+    <div class="flow-node action" style="border-color:rgba(251,146,60,0.5)">Slave 將溫度/耳套/藍芽狀態封裝為 JSON 發回 Master</div>
+    <div class="flow-arrow">&#8595;</div>
+    <div class="flow-node ok" style="border-color:var(--accent)">Master 整合本地+Slave 資料 → 統一判定</div>
+  </div>
+
+  <h3>連線建立後的同步</h3>
+  <div class="card">
+    <ul>
+      <li>Master 連線後會自動請求 Slave 重送所有通道的藍芽狀態</li>
+      <li>Slave 收到 <code>sync_bt_status</code> 指令後，補送所有通道狀態 + 通道啟用設定</li>
+      <li>Master 收到 Slave 通道啟用設定後，會比對兩端是否一致，不一致時發出「通道不一致」警報</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ==================== 12. 通道對應表 ==================== -->
+<section class="page-section" id="channels">
+  <h2>通道對應表</h2>
+  <p>系統使用內部通道編號（1~12）與顯示名稱（CH1~CH12），兩者的映射關係如下：</p>
+
+  <h3>Master 通道（內部 1~6）</h3>
+  <table>
+    <tr><th>內部編號</th><th>顯示名稱</th><th>PLC 對應</th><th>藍芽</th></tr>
+    <tr><td>1</td><td class="bold c-accent">CH11</td><td>D512 / D528 / D540</td><td>Master 第 1 組 MAC</td></tr>
+    <tr><td>2</td><td class="bold c-accent">CH9</td><td>D510 / D526 / D538</td><td>Master 第 2 組 MAC</td></tr>
+    <tr><td>3</td><td class="bold c-accent">CH7</td><td>D508 / D524 / D536</td><td>Master 第 3 組 MAC</td></tr>
+    <tr><td>4</td><td class="bold c-accent">CH5</td><td>D506 / D522 / D534</td><td>Master 第 4 組 MAC</td></tr>
+    <tr><td>5</td><td class="bold c-accent">CH3</td><td>D504 / D520 / D532</td><td>Master 第 5 組 MAC</td></tr>
+    <tr><td>6</td><td class="bold c-accent">CH1</td><td>D502 / D518 / D530</td><td>Master 第 6 組 MAC</td></tr>
+  </table>
+
+  <h3>Slave 通道（內部 7~12）</h3>
+  <table>
+    <tr><th>內部編號</th><th>顯示名稱</th><th>PLC 對應</th><th>藍芽</th></tr>
+    <tr><td>7</td><td class="bold c-orange">CH12</td><td>D513(結果) / D529 / D541</td><td>Slave 第 1 組 MAC</td></tr>
+    <tr><td>8</td><td class="bold c-orange">CH10</td><td>D511 / D527 / D539</td><td>Slave 第 2 組 MAC</td></tr>
+    <tr><td>9</td><td class="bold c-orange">CH8</td><td>D509 / D525 / D537</td><td>Slave 第 3 組 MAC</td></tr>
+    <tr><td>10</td><td class="bold c-orange">CH6</td><td>D507 / D523 / D535</td><td>Slave 第 4 組 MAC</td></tr>
+    <tr><td>11</td><td class="bold c-orange">CH4</td><td>D505 / D521 / D533</td><td>Slave 第 5 組 MAC</td></tr>
+    <tr><td>12</td><td class="bold c-orange">CH2</td><td>D503 / D519 / D531</td><td>Slave 第 6 組 MAC</td></tr>
+  </table>
+
+  <div class="card highlight">
+    <div class="card-title c-accent">CSV 欄位映射</div>
+    <p>CSV 中的 scan1~scan12 對應 CH1~CH12（<strong>按顯示名稱排序</strong>，非內部編號）：</p>
+    <p><code>scan1</code>=CH1, <code>scan2</code>=CH2, ... <code>scan12</code>=CH12</p>
+  </div>
+</section>
+
+<!-- ==================== 13. 常見問題 ==================== -->
+<section class="page-section" id="faq">
+  <h2>常見問題</h2>
+
+  <div class="card">
+    <div class="card-title c-yellow">Q: 啟動後通道一直顯示灰色，藍芽連不上？</div>
+    <p><strong>A:</strong> 請依序檢查：</p>
+    <ol>
+      <li>確認耳溫槍已開機且藍芽已啟用</li>
+      <li>確認 Windows 藍芽已開啟</li>
+      <li>確認進階設定中的 MAC 位址正確（格式：<code>XX:XX:XX:XX:XX:XX</code>）</li>
+      <li>確認該通道的啟用開關已打開</li>
+      <li>查看系統 Log 是否有「連線失敗」的錯誤訊息</li>
+      <li>嘗試在 Windows 藍芽設定中先手動配對該耳溫槍</li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <div class="card-title c-yellow">Q: Master 的 Slave 通道全部灰色？</div>
+    <p><strong>A:</strong> 表示 Master-Slave 網路未連線。請確認：</p>
+    <ol>
+      <li>Slave 程式是否已啟動</li>
+      <li>兩端的 Master IP 與 Port 設定是否一致</li>
+      <li>Windows 防火牆是否允許 Port 5001</li>
+      <li>查看網路指示燈是否為 <span class="status-dot green"></span> 綠色</li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <div class="card-title c-yellow">Q: PLC 指示燈一直是紅色？</div>
+    <p><strong>A:</strong> 請確認：</p>
+    <ol>
+      <li>PLC 是否上電且網路線已連接</li>
+      <li>確認 PLC IP 位址與 Port 設定正確</li>
+      <li>可用 <code>ping {PLC IP}</code> 測試網路連通性</li>
+      <li>確認 <code>config.json</code> 中 <code>plc.enabled</code> 為 <code>true</code></li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <div class="card-title c-yellow">Q: 如何修改誤差範圍？</div>
+    <p><strong>A:</strong></p>
+    <ol>
+      <li>點擊右上角齒輪 &#9881; 開啟設定面板</li>
+      <li>輸入管理密碼登入</li>
+      <li>在「系統設定」中修改「誤差上限」和「誤差下限」</li>
+      <li>點擊「<strong>更新資料（即時套用）</strong>」立即生效</li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <div class="card-title c-yellow">Q: 如何在無硬體環境下測試？</div>
+    <p><strong>A:</strong> 在 <code>config.json</code> 中設定 <code>"simulation_mode": true</code>，系統會模擬藍芽連線與量測數據。模擬模式下可使用手動觸發按鈕測試完整流程。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-title c-yellow">Q: CSV 被 Excel 開啟時系統寫入會失敗嗎？</div>
+    <p><strong>A:</strong> 量測 CSV 使用 append 模式寫入，Excel 開啟時通常可正常寫入。異常記錄 CSV（Alarm）若被鎖定，系統會自動寫入備用檔案（<code>_1.csv</code>後綴），不會遺失資料。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-title c-yellow">Q: 停用通道後需要重啟程式嗎？</div>
+    <p><strong>A:</strong> 不需要。修改通道啟用狀態後點擊「更新資料（即時套用）」，系統會立即：</p>
+    <ul>
+      <li>停止向停用通道發送量測指令</li>
+      <li>斷開停用通道的藍芽連線</li>
+      <li>清除 PLC 對應的錯誤位元</li>
+      <li>UI 上以半透明方式顯示</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="card-title c-yellow">Q: 暖槍中空槍值超限會立即報警嗎？</div>
+    <p><strong>A:</strong> 不會。暖槍中（PLC D542=1 時），系統會容忍前 2 次空槍超限，直到連續第 3 次才發出警報。暖槍結束（D542=0）後，超限計數自動歸零。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-title c-yellow">Q: 按了 F5 畫面刷新後資料會消失嗎？</div>
+    <p><strong>A:</strong> 按 F5 只會重新載入 UI 畫面，所有後端管理器（藍芽、PLC、網路、量測）仍在運行中。畫面會重新同步到最新狀態。已經寫入 CSV 的資料不受影響。</p>
+  </div>
+</section>
+
+</div><!-- end .main -->
+
+<!-- ===== Navigation Script ===== -->
+<script>
+(function() {
+  const navLinks = document.querySelectorAll('.nav-link[data-page]');
+  const tocItems = document.querySelectorAll('.toc-item[data-goto]');
+  const sections = document.querySelectorAll('.page-section');
+
+  function showPage(pageId) {
+    sections.forEach(s => s.classList.remove('active'));
+    navLinks.forEach(l => l.classList.remove('active'));
+
+    const target = document.getElementById(pageId);
+    if (target) target.classList.add('active');
+
+    const link = document.querySelector(`.nav-link[data-page="${pageId}"]`);
+    if (link) link.classList.add('active');
+
+    // Scroll main to top
+    document.querySelector('.main').scrollTo(0, 0);
+  }
+
+  navLinks.forEach(link => {
+    link.addEventListener('click', (e) => {
+      e.preventDefault();
+      showPage(link.dataset.page);
+    });
+  });
+
+  tocItems.forEach(item => {
+    item.addEventListener('click', (e) => {
+      e.preventDefault();
+      showPage(item.dataset.goto);
+    });
+  });
+})();
+</script>
+
+</body>
+</html>

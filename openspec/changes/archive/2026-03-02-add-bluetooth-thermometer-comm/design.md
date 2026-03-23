@@ -100,7 +100,7 @@ def calc_checksum(data: bytes) -> int:
 
 ### 4. 程式架構
 ```
-3Bridge_Meter_HMI/
+ChingTech_Meter_HMI/
 ├── main.py              # 主程式入口
 ├── config.py            # 設定管理
 ├── bluetooth_comm.py    # 藍芽 SPP 通訊

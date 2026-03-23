@@ -1,0 +1,83 @@
+﻿<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Windows 藍牙幽靈設備移除指南</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; max-width: 800px; margin: 0 auto; padding: 20px; background-color: #f4f7f6; }
+        h1 { color: #2c3e50; text-align: center; border-bottom: 2px solid #3498db; padding-bottom: 10px; }
+        h2 { color: #2980b9; margin-top: 30px; }
+        .container { background-color: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .method-card { background: #fafafa; border-left: 5px solid #3498db; padding: 15px 20px; margin-bottom: 20px; border-radius: 0 4px 4px 0; }
+        .method-card.warning { border-left-color: #e74c3c; }
+        code { background-color: #eee; padding: 2px 6px; border-radius: 4px; font-family: Consolas, monospace; color: #d35400; word-break: break-all; }
+        .step-list { padding-left: 20px; }
+        .step-list li { margin-bottom: 10px; }
+        .toc { background-color: #e8f4f8; padding: 15px; border-radius: 6px; margin-bottom: 30px; }
+        .toc ul { list-style-type: none; padding-left: 0; }
+        .toc li { margin-bottom: 8px; }
+        .toc a { color: #2980b9; text-decoration: none; font-weight: bold; }
+        .toc a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>解決更換 Dongle 後藍牙設備無法移除的問題</h1>
+    <div class="toc">
+        <strong>目錄 (依推薦順序嘗試)：</strong>
+        <ul>
+            <li><a href="#method1">方法一：透過「依容器列出裝置」強制刪除 (專治清單卡死)</a></li>
+            <li><a href="#method2">方法二：拔除 Dongle 進行「無硬體全盤清掃」</a></li>
+            <li><a href="#method3">方法三：顯示隱藏裝置並解除安裝</a></li>
+            <li><a href="#method4">方法四：透過登錄檔 (Regedit) 強制拔除配對</a></li>
+            <li><a href="#method5">方法五：飛航模式與服務重啟法</a></li>
+        </ul>
+    </div>
+    <div id="method1" class="method-card">
+        <h2>方法一：透過「依容器列出裝置」強制刪除</h2>
+        <p>專門對付在「裝置和印表機」清單中看得到，卻一直顯示移除失敗的狀況。</p>
+        <ol class="step-list">
+            <li>打開<strong>「裝置管理員」</strong>。</li>
+            <li>點擊上方選單的<strong>「檢視」</strong>，選擇<strong>「依容器列出裝置」</strong>。</li>
+            <li>在列表中尋找你卡住的<strong>設備名稱</strong>並展開。</li>
+            <li>對著它（或底下的子項目）按右鍵，選擇<strong>「解除安裝裝置」</strong>。</li>
+        </ol>
+    </div>
+    <div id="method2" class="method-card">
+        <h2>方法二：拔除 Dongle 進行「無硬體全盤清掃」</h2>
+        <ol class="step-list">
+            <li><strong>拔下目前插在新 Dongle。</strong></li>
+            <li>打開「裝置管理員」，點選「檢視」 > <strong>「顯示隱藏的裝置」</strong>。</li>
+            <li>展開「藍牙」分類。將裡面的<strong>所有項目</strong>全部點右鍵選擇<strong>「解除安裝裝置」</strong>。</li>
+            <li><strong>重新開機</strong>（開機前不要插上 Dongle）。</li>
+            <li>開機後確認設備已消失，再插回新 Dongle。</li>
+        </ol>
+    </div>
+    <div id="method3" class="method-card">
+        <h2>方法三：顯示隱藏裝置並解除安裝</h2>
+        <ol class="step-list">
+            <li>打開<strong>「裝置管理員」</strong>。</li>
+            <li>點擊<strong>「檢視」</strong> > <strong>「顯示隱藏的裝置」</strong>。</li>
+            <li>展開<strong>「藍牙」</strong>分類，找到半透明的卡住設備，按右鍵選擇<strong>「解除安裝裝置」</strong>。</li>
+        </ol>
+    </div>
+    <div id="method4" class="method-card warning">
+        <h2>方法四：透過登錄檔 (Regedit) 強制拔除配對</h2>
+        <ol class="step-list">
+            <li>按下 <code>Win + R</code>，輸入 <code>regedit</code> 並按 Enter。</li>
+            <li>導覽至：<br><code>Computer\HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\BTHPORT\Parameters\Devices</code></li>
+            <li>展開 <code>Devices</code> 資料夾，點開裡面的 12 碼資料夾查看 <code>Name</code> 數值。</li>
+            <li>確認設備後，對著該 12 碼資料夾按右鍵選擇<strong>「刪除」</strong>。重新開機。</li>
+        </ol>
+    </div>
+    <div id="method5" class="method-card">
+        <h2>方法五：飛航模式與服務重啟法</h2>
+        <ol class="step-list">
+            <li><strong>飛航模式法：</strong>開啟「飛航模式」，趁藍牙強制關閉時嘗試「移除裝置」。</li>
+            <li><strong>重啟服務法：</strong>按下 <code>Win + R</code> 輸入 <code>services.msc</code>，找到<strong>「藍牙支援服務」</strong>，按右鍵選擇<strong>「重新啟動」</strong>。</li>
+        </ol>
+    </div>
+</div>
+</body>
+</html>
