@@ -37,8 +37,44 @@ class MeterDataPacket:
     def from_json(data: str) -> Optional['MeterDataPacket']:
         try:
             d = json.loads(data)
+        except (json.JSONDecodeError, ValueError) as e:
+            print(f"[WARN] MeterDataPacket JSON 解析失敗: {e}")
+            return None
+
+        # 驗證必要欄位
+        required = ('channel', 'meter_id', 'temperature', 'timestamp')
+        missing = [f for f in required if f not in d]
+        if missing:
+            print(f"[WARN] MeterDataPacket 缺少必要欄位: {missing}")
+            return None
+
+        # 驗證欄位值
+        try:
+            ch = int(d['channel'])
+            if not (1 <= ch <= 12):
+                print(f"[WARN] MeterDataPacket channel 超出範圍: {ch}")
+                return None
+        except (TypeError, ValueError):
+            print(f"[WARN] MeterDataPacket channel 非整數: {d['channel']}")
+            return None
+
+        if not isinstance(d['temperature'], (int, float)):
+            print(f"[WARN] MeterDataPacket temperature 非數值: {d['temperature']}")
+            return None
+
+        try:
+            ts = float(d['timestamp'])
+            if ts <= 0:
+                print(f"[WARN] MeterDataPacket timestamp 非正數: {ts}")
+                return None
+        except (TypeError, ValueError):
+            print(f"[WARN] MeterDataPacket timestamp 無效: {d['timestamp']}")
+            return None
+
+        try:
             return MeterDataPacket(**d)
-        except:
+        except (TypeError, KeyError) as e:
+            print(f"[WARN] MeterDataPacket 建構失敗: {e}")
             return None
 
 
