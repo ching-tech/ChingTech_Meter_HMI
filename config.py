@@ -8,9 +8,12 @@ from dataclasses import dataclass, field, asdict
 from typing import List, Optional
 
 # --- 設定檔路徑 ---
+# 預設放在程式資料夾外，避免部署時覆蓋客戶設定
 # 支援命令列參數: python main.py --config slave_test/config.json
 import sys
-CONFIG_FILE = "config.json"
+_CONFIG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "ChingTech_Meter_HMI_config")
+CONFIG_FILE = os.path.join(_CONFIG_DIR, "config.json")
 for i, arg in enumerate(sys.argv):
     if arg == "--config" and i + 1 < len(sys.argv):
         CONFIG_FILE = sys.argv[i + 1]
@@ -94,8 +97,21 @@ class AppConfig:
     timing: TimingConfig = field(default_factory=TimingConfig)
 
 
+def _ensure_config_exists():
+    """若外部設定檔不存在，從程式內附的 config.default.json 複製一份"""
+    if os.path.exists(CONFIG_FILE):
+        return
+    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+    default_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.default.json")
+    if os.path.exists(default_file):
+        import shutil
+        shutil.copy2(default_file, CONFIG_FILE)
+        print(f"已從 {default_file} 建立初始設定檔: {CONFIG_FILE}")
+
+
 def load_config() -> AppConfig:
     """載入設定檔"""
+    _ensure_config_exists()
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:

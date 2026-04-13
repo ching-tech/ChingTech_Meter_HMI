@@ -1,0 +1,66 @@
+{
+  "version": "2.1.0",
+  "title": "擎添耳溫槍探頭套檢測系統",
+  "window_width": 1200,
+  "window_height": 850,
+  "simulation_mode": false,
+  "log_dir": "D:\\logs",
+  "current_batch": "20260305144532.csv",
+  "bluetooth": {
+    "enabled": true,
+    "device_addresses": [
+      "00:06:66:84:0d:87",
+      "",
+      "",
+      "",
+      "",
+      ""
+    ],
+    "reconnect_interval": 5.0,
+    "timeout": 10.0
+  },
+  "plc": {
+    "enabled": false,
+    "ip_address": "127.0.0.1",
+    "port": 5000
+  },
+  "network": {
+    "mode": "master",
+    "master_ip": "127.0.0.1",
+    "port": 5001,
+    "slave_meter_offset": 6
+  },
+  "measurement": {
+    "tolerance_upper": 0.3,
+    "tolerance_lower": 0.5,
+    "empty_upper": 40.0,
+    "empty_lower": 20.0,
+    "meter_count": 12,
+    "channel_enabled": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ],
+    "temp_anomaly_enabled": true,
+    "temp_anomaly_upper": 42.0,
+    "temp_anomaly_lower": 30.0,
+    "no_cover_anomaly_enabled": true,
+    "no_cover_anomaly_count": 5
+  },
+  "timing": {
+    "empty_collect_delay": 3.0,
+    "measure_collect_delay": 3.0,
+    "bt_request_interval": 0.1,
+    "plc_poll_interval": 0.1,
+    "result_hold_time": 1.0
+  }
+}
