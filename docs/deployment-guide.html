@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>擎添耳溫槍檢測系統 - 部署指南</title>
+<title>三橋耳溫槍檢測系統 - 部署指南</title>
 <style>
   :root {
     --primary: #2563eb;
@@ -225,7 +225,7 @@
 </head>
 <body>
 
-<h1>擎添耳溫槍探頭套檢測系統 — 部署指南
+<h1>三橋耳溫槍探頭套檢測系統 — 部署指南
   <br><small>Master / Slave 雙機部署</small>
 </h1>
 
@@ -258,9 +258,9 @@ pip install nicegui pymcprotocol</code></pre>
 
 <!-- Step 2 -->
 <h2><span class="step">2</span>複製程式檔案</h2>
-<p>將以下檔案複製到兩台電腦的同一個資料夾（例如 <code>D:\ChingTech_Meter_HMI</code>）：</p>
+<p>將以下檔案複製到兩台電腦的同一個資料夾（例如 <code>D:\3Bridge_Meter_HMI</code>）：</p>
 <div class="file-tree">
-ChingTech_Meter_HMI/
+3Bridge_Meter_HMI/
 ├── <span class="needed">main.py</span>
 ├── <span class="needed">config.py</span>
 ├── <span class="needed">bluetooth_comm.py</span>
@@ -375,7 +375,7 @@ ChingTech_Meter_HMI/
 </div>
 
 <pre><span class="label">PowerShell（管理員）— Master 電腦執行</span><code><span class="comment"># 開放防火牆 port 5001</span>
-netsh advfirewall firewall add rule name="ChingTech HMI" dir=in action=allow protocol=TCP localport=5001</code></pre>
+netsh advfirewall firewall add rule name="3Bridge HMI" dir=in action=allow protocol=TCP localport=5001</code></pre>
 
 <!-- Step 5 -->
 <h2><span class="step">5</span>建立啟動捷徑</h2>
@@ -470,7 +470,7 @@ exit</code></pre>
 </table>
 
 <footer>
-  擎添耳溫槍探頭套檢測系統 v2.1.0 — 部署指南
+  三橋耳溫槍探頭套檢測系統 v2.1.0 — 部署指南
 </footer>
 
 </body>
