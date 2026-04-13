@@ -42,4 +42,5 @@ desktop.ini
 main.spec
 .claude/
 .gemini/
+internal/
 nul
