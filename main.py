@@ -78,7 +78,8 @@ plc_status_icon = None
 network_status_icon = None
 system_status_label = None  
 measure_status_label = None 
-current_batch_label = None  # 顯示目前批次檔名
+batch_no_input = None       # 批號輸入框
+machine_name_input = None   # 設定頁的機台名稱輸入框
 plc_monitor_ui = {}         
 system_running = False
 slave_channel_enabled = {}  # Slave 回報的通道啟用狀態 {ch: bool}
@@ -186,26 +187,11 @@ def init_managers():
         system_status_label.classes('text-green-400', remove='text-red-400')
     log_message("系統服務已全面啟動")
     
-    # 沿用 config 中的批次，或建立新批次 (僅 Master 需要寫入 CSV)
+    # 確保今日 log 檔案存在 (僅 Master 需要寫入 CSV)
     if measure_manager and config.network.mode == "master":
-        resumed = False
-        if config.current_batch:
-            filepath = measure_manager.resume_batch(config.current_batch)
-            if filepath:
-                filename = os.path.basename(filepath)
-                if current_batch_label:
-                    current_batch_label.set_text(f"目前批次: {filename}")
-                log_message(f"沿用既有批次檔案: {filename}")
-                resumed = True
-        if not resumed:
-            filepath = measure_manager.start_new_batch()
-            if filepath:
-                filename = os.path.basename(filepath)
-                config.current_batch = filename
-                save_config(config)
-                if current_batch_label:
-                    current_batch_label.set_text(f"目前批次: {filename}")
-                log_message(f"已建立初始批次檔案: {filename}")
+        filepath = measure_manager.ensure_today_log_file(config.machine_name)
+        if filepath:
+            log_message(f"今日記錄檔: {os.path.basename(filepath)}")
 
 def is_channel_enabled(channel: int) -> bool:
     if 1 <= channel <= 12:
@@ -816,7 +802,9 @@ def on_measurement_complete(result):
         log_saved = measure_manager.save_cycle_log(
             plc_data=plc_manager.plc_data if plc_manager else None,
             ear_covers=ear_cover_statuses,
-            enabled_channels=get_enabled_channel_list()
+            enabled_channels=get_enabled_channel_list(),
+            batch_no=config.batch_no,
+            machine_name=config.machine_name,
         )
         log_message(f"[流程] 量測 Log 寫入: {'成功' if log_saved else '失敗'}")
 
@@ -845,28 +833,35 @@ def on_measurement_complete(result):
     else:
         log_message("[錯誤] plc_manager 不存在，無法寫入 PLC 結果!")
 
-def on_new_batch_click():
-    """點擊『換批』按鈕"""
-    if measure_manager:
-        filepath = measure_manager.start_new_batch()
-        if filepath:
-            filename = os.path.basename(filepath)
-            # 寫入 config 持久化
-            config.current_batch = filename
-            save_config(config)
+def on_batch_no_commit():
+    """提交批號：驗證僅英數字，寫入 config 並持久化"""
+    if not batch_no_input:
+        return
+    raw = (batch_no_input.value or "").strip()
+    import re
+    if raw and not re.fullmatch(r'[A-Za-z0-9]+', raw):
+        ui.notify("批號僅能為英文字母與數字", type='negative')
+        # 還原為前次有效值
+        batch_no_input.set_value(config.batch_no)
+        return
+    if raw == config.batch_no:
+        return
+    config.batch_no = raw
+    save_config(config)
+    ui.notify(f"批號已設定: {raw or '(空白)'}", type='positive')
+    log_message(f"[批號] 設定為: {raw or '(空白)'}")
 
-            if current_batch_label:
-                current_batch_label.set_text(f"目前批次: {filename}")
-
-            # 換批時將 PLC 的 OK/NG 計數歸零 (D517~D540)
-            if plc_manager:
-                plc_manager.write_ok_ng_counts([0]*12, [0]*12)
-                log_message(f"換批成功，PLC 計數已歸零: {filename}")
-            else:
-                log_message(f"換批成功: {filename}")
-
-            ui.notify(f"已更換新批次並歸零計數: {filename}", type='positive')
-            log_message(f"使用者手動更換批次: {filename}")
+def on_reset_count_click():
+    """點擊『計數歸零』按鈕：清除 PLC 與 UI 上的 OK/NG 計數，不建立新檔"""
+    if plc_manager:
+        plc_manager.write_ok_ng_counts([0] * 12, [0] * 12)
+    for meter in meters_ui.values():
+        if meter.get('ok_display'):
+            meter['ok_display'].set_value(0)
+        if meter.get('ng_display'):
+            meter['ng_display'].set_value(0)
+    ui.notify("OK/NG 計數已歸零", type='positive')
+    log_message("使用者執行計數歸零")
 
 def get_enabled_channel_list():
     """取得已啟用的通道列表"""
@@ -968,7 +963,9 @@ def collect_empty_values():
             is_empty=True,
             plc_data=plc_manager.plc_data if plc_manager else None,
             ear_covers=ear_cover_statuses,
-            enabled_channels=get_enabled_channel_list()
+            enabled_channels=get_enabled_channel_list(),
+            batch_no=config.batch_no,
+            machine_name=config.machine_name,
         )
 
     update_plc_display()
@@ -1061,6 +1058,8 @@ def update_channel_disabled_display():
 
 def _refresh_ui_from_config():
     """從 config 刷新所有設定面板 UI 元件的顯示值"""
+    # 機台名稱
+    if machine_name_input: machine_name_input.set_value(config.machine_name)
     # 量測參數
     if tolerance_upper_input: tolerance_upper_input.set_value(config.measurement.tolerance_upper)
     if tolerance_lower_input: tolerance_lower_input.set_value(config.measurement.tolerance_lower)
@@ -1204,6 +1203,15 @@ def toggle_settings():
 
 def _collect_settings_from_ui():
     """從 UI 收集所有設定值寫入 config"""
+    # 機台名稱 (僅允許英數字、底線、連字號，作為檔名一部分)
+    if machine_name_input:
+        import re
+        raw = (machine_name_input.value or "").strip()
+        if raw and not re.fullmatch(r'[A-Za-z0-9_\-]+', raw):
+            ui.notify("機台名稱僅能為英數字、底線或連字號", type='negative')
+            machine_name_input.set_value(config.machine_name)
+        else:
+            config.machine_name = raw or "Machine1"
     if tolerance_upper_input: config.measurement.tolerance_upper = tolerance_upper_input.value
     if tolerance_lower_input: config.measurement.tolerance_lower = tolerance_lower_input.value
     if empty_upper_input: config.measurement.empty_upper = empty_upper_input.value
@@ -1422,7 +1430,7 @@ def update_plc_display():
             except: pass
 
 def build_settings_drawer():
-    global settings_drawer, timing_inputs, plc_inputs, bt_inputs, bt_mac_inputs, net_inputs, mode_select, tolerance_upper_input, tolerance_lower_input, empty_upper_input, empty_lower_input, settings_logged_in, protected_sections, temp_anomaly_switch, temp_anomaly_upper_input, temp_anomaly_lower_input, temp_anomaly_fields, no_cover_anomaly_switch, no_cover_anomaly_count_input, no_cover_anomaly_fields
+    global settings_drawer, timing_inputs, plc_inputs, bt_inputs, bt_mac_inputs, net_inputs, mode_select, tolerance_upper_input, tolerance_lower_input, empty_upper_input, empty_lower_input, settings_logged_in, protected_sections, temp_anomaly_switch, temp_anomaly_upper_input, temp_anomaly_lower_input, temp_anomaly_fields, no_cover_anomaly_switch, no_cover_anomaly_count_input, no_cover_anomaly_fields, machine_name_input
     is_master = config.network.mode == "master"
     protected_sections = []
 
@@ -1432,7 +1440,11 @@ def build_settings_drawer():
 
     def on_login_click(pwd_input, login_status):
         global settings_logged_in
-        if pwd_input.value == SETTINGS_PASSWORD:
+        valid_passwords = {SETTINGS_PASSWORD}
+        extra = (config.extra_password or "").strip()
+        if extra:
+            valid_passwords.add(extra)
+        if pwd_input.value in valid_passwords:
             settings_logged_in = True
             update_protected_visibility()
             login_status.set_text('已登入')
@@ -1503,6 +1515,10 @@ def build_settings_drawer():
                     sys_section.set_visibility(settings_logged_in)
                     with ui.expansion('系統設定', icon='settings').classes('w-full bg-slate-800').props('default-opened'):
                         with ui.column().classes('w-full gap-2 p-2'):
+                            with ui.row().classes('items-center'):
+                                ui.label('機台名稱:').classes('text-gray-300 w-28')
+                                machine_name_input = ui.input(value=config.machine_name, placeholder='例如 Machine1') \
+                                    .props('outlined dense').classes('w-36')
                             if is_master:
                                 with ui.row().classes('items-center'):
                                     ui.label('誤差上限:').classes('text-gray-300 w-28')
@@ -1635,7 +1651,7 @@ def build_meter_block(title: str, start_ch: int, end_ch: int, border_color: str 
             meters_ui[i] = {'row_container': row_container, 'disabled_badge': disabled_badge, 'bt_icon': bt_icon, 'ear_cover': ear_cover_label, 'empty_display': empty_display, 'temp_display': temp_display, 'error_display': error_display, 'light': status_light, 'text': status_text, 'ok_display': ok_display, 'ng_display': ng_display, 'no_cover_count': no_cover_count_label}
 
 def build_ui():
-    global meters_ui, log_console, plc_status_icon, network_status_icon, alert_container, alert_message_label, system_status_label, measure_status_label, plc_monitor_ui, current_batch_label
+    global meters_ui, log_console, plc_status_icon, network_status_icon, alert_container, alert_message_label, system_status_label, measure_status_label, plc_monitor_ui, batch_no_input
     is_master = config.network.mode == "master"
     ui.colors(primary='#5898d4', secondary='#26a69a', accent='#9c27b0', dark='#1d1d1d')
     ui.add_head_html('<style>body { user-select: text !important; -webkit-user-select: text !important; }</style>')
@@ -1649,12 +1665,21 @@ def build_ui():
                     ui.label(config.title).classes('text-3xl text-white font-bold')
                     ui.label(f'v{config.version}').classes('text-base text-gray-400')
                     ui.badge('MASTER' if is_master else 'SLAVE', color='blue' if is_master else 'orange').classes('text-lg px-3 py-1')
-                    
-                    # 顯示目前批次
+                    # 機台名稱顯示 (3 台機共用程式，靠 config 區分)
+                    ui.badge(config.machine_name, color='teal').classes('text-lg px-3 py-1')
+
+                    # 批號輸入 + 計數歸零 (僅 Master)
                     if is_master:
-                        batch_text = f'目前批次: {config.current_batch}' if config.current_batch else '目前批次: --'
-                        current_batch_label = ui.label(batch_text).classes('text-blue-300 text-lg font-mono ml-4')
-                        ui.button('換批', on_click=on_new_batch_click).props('color=blue icon=fiber_new outline').classes('ml-2')
+                        ui.label('批號:').classes('text-gray-300 text-lg ml-4')
+                        batch_no_input = ui.input(value=config.batch_no, placeholder='英數字') \
+                            .props('outlined dense dark') \
+                            .props('input-class="text-blue-300 font-mono text-lg"') \
+                            .classes('w-40')
+                        batch_no_input.on('blur', lambda e: on_batch_no_commit())
+                        ui.button('設定', on_click=on_batch_no_commit) \
+                            .props('color=blue dense icon=save outline').classes('ml-1')
+                        ui.button('計數歸零', on_click=on_reset_count_click) \
+                            .props('color=orange icon=restart_alt outline').classes('ml-2')
 
                     if is_master:
                         ui.label('|').classes('text-gray-600 text-2xl mx-2')

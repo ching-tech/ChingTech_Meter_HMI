@@ -88,7 +88,9 @@ class AppConfig:
     window_height: int = 900
     simulation_mode: bool = True  # 模擬模式 (無硬體時使用)
     log_dir: str = "logs"  # 量測記錄目錄
-    current_batch: str = ""  # 目前批次檔名 (程式重啟時沿用)
+    machine_name: str = "Machine1"  # 機台名稱 (用於 log 檔名與 UI 顯示)
+    batch_no: str = ""  # 目前批號 (人員輸入，限定英數字，每筆 log 列首寫入此值)
+    extra_password: str = "1234"  # 進階設定額外密碼 (與內建密碼並行)
 
     bluetooth: BluetoothConfig = field(default_factory=BluetoothConfig)
     plc: PLCConfig = field(default_factory=PLCConfig)
@@ -138,7 +140,7 @@ def _dict_to_config(data: dict) -> AppConfig:
     config = AppConfig()
 
     # 更新基本欄位
-    for key in ['version', 'title', 'window_width', 'window_height', 'simulation_mode', 'log_dir', 'current_batch']:
+    for key in ['version', 'title', 'window_width', 'window_height', 'simulation_mode', 'log_dir', 'machine_name', 'batch_no', 'extra_password']:
         if key in data:
             setattr(config, key, data[key])
 

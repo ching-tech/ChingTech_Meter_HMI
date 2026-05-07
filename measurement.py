@@ -124,38 +124,40 @@ class MeasurementManager:
         self._init_channels()
         self._update_state(MeasurementState.IDLE)
 
-    def start_new_batch(self):
-        """開始新批次，建立新的 CSV 檔案並寫入標題列"""
+    def ensure_today_log_file(self, machine_name: str = "Machine1"):
+        """確保今日 log 檔案存在 (檔名: log_YYYYMMDD_<machine_name>.csv)。
+        檔案不存在時建立並寫入標題列；已存在時直接續寫。
+        每次寫入前呼叫，可自動處理跨日與機台名變更。
+        """
         if not self.enable_logging:
             return None
-        now = datetime.now()
-        timestamp = now.strftime("%Y%m%d%H%M%S")
-        self.current_log_file = os.path.join(self.log_dir, f"{timestamp}.csv")
-        
+        os.makedirs(self.log_dir, exist_ok=True)
+        date_str = datetime.now().strftime("%Y%m%d")
+        safe_machine = machine_name.strip() or "Machine"
+        filename = f"log_{date_str}_{safe_machine}.csv"
+        filepath = os.path.join(self.log_dir, filename)
+
+        if os.path.exists(filepath):
+            self.current_log_file = filepath
+            return filepath
+
         try:
-            with open(self.current_log_file, 'w', newline='', encoding='utf-8-sig') as f:
+            with open(filepath, 'w', newline='', encoding='utf-8-sig') as f:
                 writer = csv.writer(f)
-                # 第一列標籤
-                writer.writerow(['', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'J', 'K', 'L', 'M'] + [''] * 41)
-                # 第二列標題 (種類 + scan1~12 + 其他)
-                header = ['種類'] + [f'scan{i}' for i in range(1, 13)] + ['Time', '誤差上限', '誤差下限']
+                # 第一列標籤 (批號欄位佔位 + A~M + 其餘空白)
+                writer.writerow(['', '', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'J', 'K', 'L', 'M'] + [''] * 41)
+                # 第二列標題 (批號 + 種類 + scan1~12 + 其他)
+                header = ['批號', '種類'] + [f'scan{i}' for i in range(1, 13)] + ['Time', '誤差上限', '誤差下限']
                 header += [f'scan{i} cover' for i in range(1, 13)]
                 header += [f'scan{i} OK' for i in range(1, 13)]
                 header += [f'scan{i} NG' for i in range(1, 13)]
                 header += ['TOTAL OK', 'TOTAL NG']
                 writer.writerow(header)
-            return self.current_log_file
-        except Exception as e:
-            print(f"建立新批次檔案失敗: {e}")
-            return None
-
-    def resume_batch(self, filename: str) -> Optional[str]:
-        """沿用既有批次檔案 (程式重啟時使用)"""
-        filepath = os.path.join(self.log_dir, filename)
-        if os.path.exists(filepath):
             self.current_log_file = filepath
             return filepath
-        return None
+        except Exception as e:
+            print(f"建立今日記錄檔失敗: {e}")
+            return None
 
     def start_empty_measurement(self):
         """開始空槍量測"""
@@ -312,22 +314,27 @@ class MeasurementManager:
 
     def save_cycle_log(self, is_empty: bool = False, plc_data=None,
                        ear_covers: Dict[int, str] = None,
-                       enabled_channels: List[int] = None) -> bool:
-        """保存單次量測的一列 54 欄位資料至 CSV (每次 D515/D500 觸發時呼叫)
+                       enabled_channels: List[int] = None,
+                       batch_no: str = "",
+                       machine_name: str = "Machine1") -> bool:
+        """保存單次量測的一列資料至 CSV (每次 D515/D500 觸發時呼叫)。
+        會自動依據機台名與當天日期切換到對應的 log 檔。
 
         Args:
             is_empty: True=空槍觸發(D515), False=量測觸發(D500)
             plc_data: PLC 資料物件
             ear_covers: 各通道耳套狀態 dict {channel: "1111"/"0000"}
             enabled_channels: 已啟用的通道列表
+            batch_no: 批號 (人員輸入，寫入列首)
+            machine_name: 機台名稱 (決定 log 檔名)
 
         Returns:
             True=寫入成功, False=寫入失敗或未啟用
         """
         if not self.enable_logging:
             return False
-        if not self.current_log_file:
-            self.start_new_batch()
+        # 每次寫入前確認檔案 (處理跨日 / 機台名變更)
+        self.ensure_today_log_file(machine_name)
 
         now = datetime.now()
         time_str = now.strftime("%Y/%m/%d %H:%M:%S")
@@ -359,6 +366,9 @@ class MeasurementManager:
             with open(self.current_log_file, 'a', newline='', encoding='utf-8-sig') as f:
                 writer = csv.writer(f)
                 row = []
+
+                # 列首: 批號
+                row.append(batch_no or "")
 
                 # A欄: 空槍寫 "empty"，量測寫 PLC D516 值
                 if is_empty:
