@@ -292,9 +292,9 @@ class MeasurementManager:
             ch for ch in self._channels.values()
             if ch.empty_value is not None
         ]
-        # 如果沒有任何空槍值，視為未完成
+        # 沒有任何空槍值 (例如全部通道停用) 時視為已完成，避免流程卡住
         if not channels_with_empty:
-            return False
+            return True
         # 檢查所有有空槍值的通道是否都有量測值
         return all(
             ch.measure_value is not None

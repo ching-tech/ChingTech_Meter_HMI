@@ -5,7 +5,9 @@
   "window_height": 850,
   "simulation_mode": false,
   "log_dir": "slave_test/logs",
-  "current_batch": "",
+  "machine_name": "Machine1",
+  "batch_no": "",
+  "extra_password": "1234",
   "bluetooth": {
     "enabled": true,
     "device_addresses": [
@@ -33,21 +35,28 @@
   "measurement": {
     "tolerance_upper": 0.3,
     "tolerance_lower": 0.2,
+    "empty_upper": 40.0,
+    "empty_lower": 20.0,
     "meter_count": 12,
     "channel_enabled": [
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
       false,
       false,
       false,
       false,
       false
-    ]
+    ],
+    "temp_anomaly_enabled": false,
+    "temp_anomaly_upper": 42.0,
+    "temp_anomaly_lower": 30.0,
+    "no_cover_anomaly_enabled": false,
+    "no_cover_anomaly_count": 3
   },
   "timing": {
     "empty_collect_delay": 0.5,

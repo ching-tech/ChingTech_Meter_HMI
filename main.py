@@ -833,15 +833,35 @@ def on_measurement_complete(result):
     else:
         log_message("[錯誤] plc_manager 不存在，無法寫入 PLC 結果!")
 
+_batch_revert_timer = None
+
+def _schedule_batch_revert():
+    """輸入框失焦時排程還原；若 150ms 內按下 SAVE，timer 會被取消"""
+    global _batch_revert_timer
+    if _batch_revert_timer:
+        _batch_revert_timer.cancel()
+
+    def _revert():
+        global _batch_revert_timer
+        _batch_revert_timer = None
+        if batch_no_input and (batch_no_input.value or "") != config.batch_no:
+            batch_no_input.set_value(config.batch_no)
+
+    _batch_revert_timer = ui.timer(0.15, _revert, once=True)
+
 def on_batch_no_commit():
     """提交批號：驗證僅英數字，寫入 config 並持久化"""
+    global _batch_revert_timer
+    # 先取消還原排程，避免 SAVE 後又被還原成舊值
+    if _batch_revert_timer:
+        _batch_revert_timer.cancel()
+        _batch_revert_timer = None
     if not batch_no_input:
         return
     raw = (batch_no_input.value or "").strip()
     import re
     if raw and not re.fullmatch(r'[A-Za-z0-9]+', raw):
         ui.notify("批號僅能為英文字母與數字", type='negative')
-        # 還原為前次有效值
         batch_no_input.set_value(config.batch_no)
         return
     if raw == config.batch_no:
@@ -851,17 +871,70 @@ def on_batch_no_commit():
     ui.notify(f"批號已設定: {raw or '(空白)'}", type='positive')
     log_message(f"[批號] 設定為: {raw or '(空白)'}")
 
+def on_force_clear_triggers():
+    """『流程解卡』按鈕：強制將 D500 與 D515 寫 0，並重置量測狀態機"""
+    def do_clear():
+        if plc_manager:
+            plc_manager.write_complete_signal()   # D500 = 0
+            plc_manager.clear_empty_trigger()     # D515 = 0
+        # 重置觸發時戳，避免馬上又跳超時警報
+        globals()['_d500_triggered_at'] = 0.0
+        globals()['_d515_triggered_at'] = 0.0
+        # 重置量測狀態機回 IDLE
+        if measure_manager:
+            measure_manager.reset()
+        # 清除 UI 上的量測值顯示
+        for meter in meters_ui.values():
+            try:
+                with meter['light'].client:
+                    meter['empty_display'].set_value(0.00)
+                    meter['temp_display'].set_value(0.00)
+                    meter['error_display'].set_value(0.00)
+                    meter['light'].props('color=grey')
+                    meter['text'].set_text('WAIT')
+                    meter['text'].classes('text-gray-500', remove='text-green-500 text-red-500')
+            except Exception:
+                pass
+        ui.notify("已強制將 D500 / D515 歸零，量測狀態已重置", type='warning')
+        log_message("[流程] 使用者強制解卡：D500/D515 → 0，狀態機 → IDLE")
+        dialog.close()
+
+    with ui.dialog() as dialog, ui.card().classes('bg-slate-800'):
+        with ui.row().classes('items-center gap-3 mb-2'):
+            ui.icon('build_circle', size='md', color='red')
+            ui.label('強制流程解卡').classes('text-xl text-white font-bold')
+        ui.label('此操作會強制將 PLC 的 D500 (量測觸發) 與 D515 (空槍觸發) 寫 0，').classes('text-gray-300')
+        ui.label('並重置 HMI 量測狀態機，使後續流程能繼續。').classes('text-gray-300')
+        ui.label('僅在流程明顯卡住時使用，是否繼續？').classes('text-yellow-300 mt-1')
+        with ui.row().classes('w-full justify-end gap-2 mt-3'):
+            ui.button('取消', on_click=dialog.close).props('flat color=grey')
+            ui.button('確認解卡', icon='build_circle', on_click=do_clear).props('color=red')
+    dialog.open()
+
 def on_reset_count_click():
-    """點擊『計數歸零』按鈕：清除 PLC 與 UI 上的 OK/NG 計數，不建立新檔"""
-    if plc_manager:
-        plc_manager.write_ok_ng_counts([0] * 12, [0] * 12)
-    for meter in meters_ui.values():
-        if meter.get('ok_display'):
-            meter['ok_display'].set_value(0)
-        if meter.get('ng_display'):
-            meter['ng_display'].set_value(0)
-    ui.notify("OK/NG 計數已歸零", type='positive')
-    log_message("使用者執行計數歸零")
+    """點擊『計數歸零』按鈕：先彈出確認視窗，確認後才執行歸零"""
+    def do_reset():
+        if plc_manager:
+            plc_manager.write_ok_ng_counts([0] * 12, [0] * 12)
+        for meter in meters_ui.values():
+            if meter.get('ok_display'):
+                meter['ok_display'].set_value(0)
+            if meter.get('ng_display'):
+                meter['ng_display'].set_value(0)
+        ui.notify("OK/NG 計數已歸零", type='positive')
+        log_message("使用者執行計數歸零")
+        dialog.close()
+
+    with ui.dialog() as dialog, ui.card().classes('bg-slate-800'):
+        with ui.row().classes('items-center gap-3 mb-2'):
+            ui.icon('warning', size='md', color='orange')
+            ui.label('確認計數歸零').classes('text-xl text-white font-bold')
+        ui.label('將清除 PLC 與畫面上所有 OK/NG 計數，此動作無法復原。').classes('text-gray-300')
+        ui.label('是否繼續？').classes('text-gray-300 mt-1')
+        with ui.row().classes('w-full justify-end gap-2 mt-3'):
+            ui.button('取消', on_click=dialog.close).props('flat color=grey')
+            ui.button('確認歸零', icon='exposure_zero', on_click=do_reset).props('color=orange')
+    dialog.open()
 
 def get_enabled_channel_list():
     """取得已啟用的通道列表"""
@@ -909,6 +982,18 @@ def collect_empty_values():
             log_message(f"[流程] 空槍收集 Slave: {net_got}")
         if net_miss:
             log_message(f"[警告] 空槍收集 Slave 無資料: {net_miss}")
+
+    # === 等待 BT 收齊：未收齊則 0.5s 後重試 (使用者按「流程解卡」會中止重試) ===
+    enabled = get_enabled_channel_list()
+    missing_chs = [ch for ch in enabled if ch not in values]
+    if missing_chs:
+        if measure_manager.state != MeasurementState.WAITING_EMPTY:
+            log_message(f"[流程] 空槍: 狀態為 {measure_manager.state.value}，停止重試")
+            return
+        miss_names = [get_channel_display_name(ch) for ch in missing_chs]
+        log_message(f"[流程] 空槍: 等待 BT 收齊 {miss_names}，0.5s 後重試")
+        threading.Timer(0.5, collect_empty_values).start()
+        return
 
     log_message(f"[流程] 空槍收集完成: 共 {len(values)} 通道有值")
     # 檢查空槍值是否超出上下限 (此函式由 D515=1 觸發流程呼叫，資料已收齊)
@@ -1016,6 +1101,18 @@ def collect_measure_values():
             log_message(f"[流程] 量測收集 Slave: {net_got}")
         if net_miss:
             log_message(f"[警告] 量測收集 Slave 無資料: {net_miss}")
+
+    # === 等待 BT 收齊：未收齊則 0.5s 後重試 (使用者按「流程解卡」會中止重試) ===
+    enabled = get_enabled_channel_list()
+    missing_chs = [ch for ch in enabled if ch not in values]
+    if missing_chs:
+        if measure_manager.state != MeasurementState.WAITING_MEASURE:
+            log_message(f"[流程] 量測: 狀態為 {measure_manager.state.value}，停止重試")
+            return
+        miss_names = [get_channel_display_name(ch) for ch in missing_chs]
+        log_message(f"[流程] 量測: 等待 BT 收齊 {miss_names}，0.5s 後重試")
+        threading.Timer(0.5, collect_measure_values).start()
+        return
 
     log_message(f"[流程] 量測收集完成: 共 {len(values)} 通道有值")
     measure_manager.record_measure_values(values)
@@ -1659,61 +1756,70 @@ def build_ui():
     build_settings_drawer()
     with ui.column().classes('w-full p-2 gap-2'):
         with ui.card().classes('w-full bg-slate-900 border-b-2 border-blue-500 p-3'):
-            with ui.row().classes('w-full justify-between items-center'):
-                with ui.row().classes('items-center gap-3'):
-                    ui.icon('medical_services', size='lg', color='blue')
-                    ui.label(config.title).classes('text-3xl text-white font-bold')
-                    ui.label(f'v{config.version}').classes('text-base text-gray-400')
-                    ui.badge('MASTER' if is_master else 'SLAVE', color='blue' if is_master else 'orange').classes('text-lg px-3 py-1')
-                    # 機台名稱顯示 (3 台機共用程式，靠 config 區分)
-                    ui.badge(config.machine_name, color='teal').classes('text-lg px-3 py-1')
+            with ui.column().classes('w-full gap-2'):
+                # === 第一列: 識別資訊 (左) + 連線狀態與設定 (右) ===
+                with ui.row().classes('w-full justify-between items-center'):
+                    with ui.row().classes('items-center gap-3'):
+                        ui.icon('medical_services', size='lg', color='blue')
+                        ui.label(config.title).classes('text-3xl text-white font-bold')
+                        ui.label(f'v{config.version}').classes('text-base text-gray-400')
+                        ui.badge('MASTER' if is_master else 'SLAVE',
+                                 color='blue' if is_master else 'orange').classes('text-lg px-3 py-1')
+                        # 機台名稱 (3 台機共用程式，靠 config 區分)
+                        ui.badge(config.machine_name, color='teal').classes('text-lg px-3 py-1')
+                    with ui.row().classes('items-center gap-4'):
+                        if is_master:
+                            with ui.row().classes('items-center gap-2'):
+                                ui.label('PLC:').classes('text-gray-300 text-xl')
+                                plc_status_icon = ui.icon('circle', color='gray').classes('text-2xl')
+                        with ui.row().classes('items-center gap-2'):
+                            ui.label('網路:').classes('text-gray-300 text-xl')
+                            network_status_icon = ui.icon('circle', color='gray').classes('text-2xl')
+                        ui.button(icon='settings', on_click=toggle_settings) \
+                            .props('flat round color=white size=lg')
 
-                    # 批號輸入 + 計數歸零 (僅 Master)
-                    if is_master:
-                        ui.label('批號:').classes('text-gray-300 text-lg ml-4')
-                        batch_no_input = ui.input(value=config.batch_no, placeholder='英數字') \
-                            .props('outlined dense dark') \
-                            .props('input-class="text-blue-300 font-mono text-lg"') \
-                            .classes('w-40')
-                        batch_no_input.on('blur', lambda e: on_batch_no_commit())
-                        ui.button('設定', on_click=on_batch_no_commit) \
-                            .props('color=blue dense icon=save outline').classes('ml-1')
-                        ui.button('計數歸零', on_click=on_reset_count_click) \
-                            .props('color=orange icon=restart_alt outline').classes('ml-2')
+                ui.separator().classes('bg-slate-700')
 
-                    if is_master:
-                        ui.label('|').classes('text-gray-600 text-2xl mx-2')
+                # === 第二列: 批號 + 即時監控 (左) + 操作按鈕 (右) ===
+                with ui.row().classes('w-full justify-between items-center'):
+                    with ui.row().classes('items-center gap-3'):
+                        if is_master:
+                            with ui.row().classes('items-center gap-1 bg-slate-800 px-3 py-1 rounded-full border border-gray-700'):
+                                ui.label('批號:').classes('text-gray-400 text-lg')
+                                batch_no_input = ui.input(value=config.batch_no, placeholder='英數字') \
+                                    .props('outlined dense dark') \
+                                    .props('input-class="text-blue-300 font-mono text-lg"') \
+                                    .classes('w-32')
+                                # 失焦時若未按 SAVE 則還原；延遲 150ms 等 SAVE 的 click 先觸發
+                                batch_no_input.on('blur', lambda e: _schedule_batch_revert())
+                                ui.button(icon='save', on_click=on_batch_no_commit) \
+                                    .props('color=blue dense flat round size=sm') \
+                                    .tooltip('設定批號')
+                            with ui.row().classes('items-center gap-2 bg-slate-800 px-4 py-1 rounded-full border border-gray-700'):
+                                ui.label('週期:').classes('text-gray-400 text-lg')
+                                plc_monitor_ui['cycle_val_top'] = ui.label('0').classes('text-yellow-400 text-2xl font-bold font-mono')
                         with ui.row().classes('items-center gap-2 bg-slate-800 px-4 py-1 rounded-full border border-gray-700'):
-                            ui.label('測試週期:').classes('text-gray-400 text-lg')
-                            plc_monitor_ui['cycle_val_top'] = ui.label('0').classes('text-yellow-400 text-2xl font-bold font-mono')
-                    ui.label('|').classes('text-gray-600 text-2xl mx-2')
-                    with ui.row().classes('items-center gap-2 bg-slate-800 px-4 py-1 rounded-full border border-gray-700'):
-                        ui.label('系統狀態:').classes('text-gray-400 text-lg')
-                        # 根據實際運行狀態設定初始文字與顏色
-                        text = '運行中' if system_running else '已停止'
-                        color = 'text-green-400' if system_running else 'text-red-400'
-                        system_status_label = ui.label(text).classes(f'{color} text-2xl font-bold')
-                    if is_master:
-                        ui.label('|').classes('text-gray-600 text-2xl mx-2')
-                        with ui.row().classes('items-center gap-2 bg-slate-800 px-4 py-1 rounded-full border border-gray-700'):
-                            ui.label('判定模式:').classes('text-gray-400 text-lg')
-                            judge_mode_label = ui.label('正常判定').classes('text-green-400 text-2xl font-bold')
-                            plc_monitor_ui['judge_mode_label'] = judge_mode_label
-                        ui.label('|').classes('text-gray-600 text-2xl mx-2')
-                        with ui.row().classes('items-center gap-2 bg-slate-800 px-4 py-1 rounded-full border border-gray-700'):
-                            ui.label('暖槍:').classes('text-gray-400 text-lg')
-                            plc_monitor_ui['warmup_label'] = ui.label('OFF').classes('text-gray-400 text-2xl font-bold')
-                with ui.row().classes('items-center gap-6'):
+                            ui.label('狀態:').classes('text-gray-400 text-lg')
+                            text = '運行中' if system_running else '已停止'
+                            color = 'text-green-400' if system_running else 'text-red-400'
+                            system_status_label = ui.label(text).classes(f'{color} text-2xl font-bold')
+                        if is_master:
+                            with ui.row().classes('items-center gap-2 bg-slate-800 px-4 py-1 rounded-full border border-gray-700'):
+                                ui.label('判定:').classes('text-gray-400 text-lg')
+                                judge_mode_label = ui.label('正常').classes('text-green-400 text-2xl font-bold')
+                                plc_monitor_ui['judge_mode_label'] = judge_mode_label
+                            with ui.row().classes('items-center gap-2 bg-slate-800 px-4 py-1 rounded-full border border-gray-700'):
+                                ui.label('暖槍:').classes('text-gray-400 text-lg')
+                                plc_monitor_ui['warmup_label'] = ui.label('OFF').classes('text-gray-400 text-2xl font-bold')
                     if is_master:
                         with ui.row().classes('items-center gap-2'):
-                            ui.label('PLC:').classes('text-gray-300 text-xl'); plc_status_icon = ui.icon('circle', color='gray').classes('text-2xl')
-                    with ui.row().classes('items-center gap-2'):
-                        ui.label('網路:').classes('text-gray-300 text-xl'); network_status_icon = ui.icon('circle', color='gray').classes('text-2xl')
-                    if is_master:
-                        ui.button('異常復歸', icon='restart_alt', on_click=on_reset_button_click) \
-                            .props('color=amber text-color=black dense size=lg') \
-                            .classes('px-4')
-                    ui.button(icon='settings', on_click=toggle_settings).props('flat round color=white size=lg')
+                            ui.button('計數歸零', icon='exposure_zero', on_click=on_reset_count_click) \
+                                .props('color=orange dense size=md').classes('px-3')
+                            ui.button('異常復歸', icon='restart_alt', on_click=on_reset_button_click) \
+                                .props('color=amber text-color=black dense size=md').classes('px-3')
+                            ui.button('流程解卡', icon='build_circle', on_click=on_force_clear_triggers) \
+                                .props('color=red dense size=md outline').classes('px-3') \
+                                .tooltip('強制將 D500/D515 寫 0，僅在流程卡住時使用')
         with ui.card().classes('w-full bg-red-600 p-3 border-2 border-red-400') as container:
             alert_container = container; alert_container.set_visibility(False)
             with ui.row().classes('w-full items-center justify-between'):
