@@ -1,15 +1,10 @@
 # 擎添耳溫槍探頭套檢測系統 - Python 套件相依性
-# Python 3.8+ required
+# Python 3.10+ required (實機測試版本: 3.13.12)
 
 # === 核心套件 (必要) ===
-nicegui>=1.4.0          # Web UI 框架
-
-# === 硬體通訊套件 (選用 - 模擬模式時不需要) ===
-# pymcprotocol>=0.4.0    # 三菱 PLC MC Protocol 通訊
+nicegui>=3.5.0,<4.0.0   # Web UI 框架 (鎖在 3.x；4.x API 可能不相容)
+pymcprotocol==0.3.0     # 三菱 PLC MC Protocol (FX5U 3E 協議)；最新即 0.3.0，作者 2021 後停止維護，故鎖死版本
 
 # === 安裝說明 ===
-# 基本安裝 (模擬模式):
-#   pip install nicegui
-#
-# 完整安裝 (含硬體通訊):
-#   pip install nicegui pymcprotocol
+#   pip install -r requirements.txt
+# 模擬模式不需要實體 PLC，但仍會 import pymcprotocol，故統一安裝
