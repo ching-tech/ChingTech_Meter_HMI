@@ -83,6 +83,8 @@ batch_no_input = None       # 批號輸入框
 machine_name_input = None   # 設定頁的機台名稱輸入框
 total_ok_label = None       # 頂部 TOTAL OK 大字
 total_ng_label = None       # 頂部 TOTAL NG 大字
+temp_anomaly_status_label = None    # 頂部「溫度異常: ON/OFF」狀態
+no_cover_anomaly_status_label = None # 頂部「連續無套: ON/OFF」狀態
 current_settings_labels = {}  # 「目前設定」面板的 label refs (供設定變更後即時刷新)
 plc_sim_switch = None       # 設定頁的 PLC 模擬模式開關
 bt_sim_switch = None        # 設定頁的藍芽模擬模式開關
@@ -1347,6 +1349,19 @@ def _refresh_ui_from_config():
         current_settings_labels['empty_upper'].set_text(f'{config.measurement.empty_upper:.1f}°C')
     if current_settings_labels.get('empty_lower'):
         current_settings_labels['empty_lower'].set_text(f'{config.measurement.empty_lower:.1f}°C')
+    # 頂部 banner 的「溫度異常 / 連續無套」使用狀態
+    if temp_anomaly_status_label is not None:
+        on = config.measurement.temp_anomaly_enabled
+        temp_anomaly_status_label.set_text('ON' if on else 'OFF')
+        temp_anomaly_status_label.classes(
+            ('text-green-400' if on else 'text-gray-500'),
+            remove='text-green-400 text-gray-500')
+    if no_cover_anomaly_status_label is not None:
+        on = config.measurement.no_cover_anomaly_enabled
+        no_cover_anomaly_status_label.set_text('ON' if on else 'OFF')
+        no_cover_anomaly_status_label.classes(
+            ('text-green-400' if on else 'text-gray-500'),
+            remove='text-green-400 text-gray-500')
     # 溫度異常
     if temp_anomaly_switch: temp_anomaly_switch.set_value(config.measurement.temp_anomaly_enabled)
     if temp_anomaly_upper_input: temp_anomaly_upper_input.set_value(config.measurement.temp_anomaly_upper)
@@ -1844,7 +1859,8 @@ def build_settings_drawer():
         settings_drawer = drawer
         with ui.row().classes('w-full items-center justify-between p-2 bg-slate-800'):
             ui.label('進階設定').classes('text-lg text-white font-bold')
-            ui.button(icon='close', on_click=toggle_settings).props('flat dense round color=white')
+            ui.button(icon='close', on_click=toggle_settings).props('flat dense round color=white') \
+                .tooltip('關閉設定面板')
         with ui.scroll_area().classes('w-full h-full'):
             with ui.column().classes('w-full p-3 gap-4'):
                 # --- 密碼登入區 ---
@@ -1854,8 +1870,10 @@ def build_settings_drawer():
                         pwd_input = ui.input(placeholder='輸入管理密碼').props('outlined dense type=password').classes('flex-grow')
                         login_status = ui.label('未登入').classes('text-gray-400 text-sm')
                     with ui.row().classes('w-full gap-2 mt-1'):
-                        ui.button('登入', on_click=lambda: on_login_click(pwd_input, login_status)).props('color=blue dense size=sm').classes('flex-grow')
-                        ui.button('登出', on_click=lambda: on_logout_click(login_status)).props('color=grey dense size=sm').classes('flex-grow')
+                        ui.button('登入', on_click=lambda: on_login_click(pwd_input, login_status)).props('color=blue dense size=sm').classes('flex-grow') \
+                            .tooltip('解鎖密碼保護的進階設定區塊（系統設定、網路、PLC、模擬、遠端記錄等）')
+                        ui.button('登出', on_click=lambda: on_logout_click(login_status)).props('color=grey dense size=sm').classes('flex-grow') \
+                            .tooltip('鎖回密碼保護區塊（進階設定隱藏，避免誤改）')
 
                 # === 需要密碼的區塊 ===
                 # --- 系統設定 ---
@@ -1867,76 +1885,97 @@ def build_settings_drawer():
                             with ui.row().classes('items-center'):
                                 ui.label('機台名稱:').classes('text-gray-300 w-28')
                                 machine_name_input = ui.input(value=config.machine_name, placeholder='例如 Machine1') \
-                                    .props('outlined dense').classes('w-36')
+                                    .props('outlined dense').classes('w-36') \
+                                    .tooltip('機台識別名稱，會用於 log/alarm 檔名後綴；多台共用同一遠端資料夾時用此區分。限英數字、底線、連字號')
                             if is_master:
                                 with ui.row().classes('items-center'):
                                     ui.label('+ 上限:').classes('text-gray-300 w-28')
-                                    tolerance_upper_input = ui.number(value=abs(config.measurement.tolerance_upper), format='%.2f', step=0.01, min=0).props('outlined dense suffix=°C').classes('w-24')
+                                    tolerance_upper_input = ui.number(value=abs(config.measurement.tolerance_upper), format='%.2f', step=0.01, min=0).props('outlined dense suffix=°C').classes('w-24') \
+                                        .tooltip('量測誤差容許上限（正值）。量測值高於基準值此範圍以內視為 PASS；超過判 NG')
                                 with ui.row().classes('items-center'):
                                     ui.label('- 下限:').classes('text-gray-300 w-28')
-                                    tolerance_lower_input = ui.number(value=abs(config.measurement.tolerance_lower), format='%.2f', step=0.01, min=0).props('outlined dense suffix=°C').classes('w-24')
+                                    tolerance_lower_input = ui.number(value=abs(config.measurement.tolerance_lower), format='%.2f', step=0.01, min=0).props('outlined dense suffix=°C').classes('w-24') \
+                                        .tooltip('量測誤差容許下限（正值，系統會自動加負號）。量測值低於基準值此範圍以內視為 PASS；超過判 NG')
                                 with ui.row().classes('items-center'):
                                     ui.label('空槍上限:').classes('text-gray-300 w-28')
-                                    empty_upper_input = ui.number(value=config.measurement.empty_upper, format='%.2f', step=0.1).props('outlined dense suffix=°C').classes('w-24')
+                                    empty_upper_input = ui.number(value=config.measurement.empty_upper, format='%.2f', step=0.1).props('outlined dense suffix=°C').classes('w-24') \
+                                        .tooltip('空槍量測 (D515) 時可接受的環境/槍體溫度上限。空槍值若高於此會視為空槍量測異常')
                                 with ui.row().classes('items-center'):
                                     ui.label('空槍下限:').classes('text-gray-300 w-28')
-                                    empty_lower_input = ui.number(value=config.measurement.empty_lower, format='%.2f', step=0.1).props('outlined dense suffix=°C').classes('w-24')
+                                    empty_lower_input = ui.number(value=config.measurement.empty_lower, format='%.2f', step=0.1).props('outlined dense suffix=°C').classes('w-24') \
+                                        .tooltip('空槍量測 (D515) 時可接受的環境/槍體溫度下限。空槍值若低於此會視為空槍量測異常')
                                 with ui.row().classes('items-center'):
                                     ui.label('判定模式:').classes('text-gray-300 w-28')
-                                    ui.toggle({JudgeMode.NORMAL: '正常', JudgeMode.FORCE_OK: '強制OK', JudgeMode.FORCE_NG: '強制NG'}, value=JudgeMode.NORMAL, on_change=on_judge_mode_change).props('dense no-caps')
+                                    ui.toggle({JudgeMode.NORMAL: '正常', JudgeMode.FORCE_OK: '強制OK', JudgeMode.FORCE_NG: '強制NG'}, value=JudgeMode.NORMAL, on_change=on_judge_mode_change).props('dense no-caps') \
+                                        .tooltip('正常: 依誤差判定 PASS/FAIL；強制OK: 全部視為 PASS；強制NG: 全部視為 FAIL（測試/校正用）')
                                 # --- 溫度異常設定 ---
                                 ui.separator().classes('my-1')
                                 with ui.row().classes('items-center'):
                                     ui.label('溫度異常:').classes('text-gray-300 w-28')
-                                    temp_anomaly_switch = ui.switch(value=config.measurement.temp_anomaly_enabled, on_change=lambda e: _toggle_temp_anomaly_fields(e.value)).props('dense')
+                                    temp_anomaly_switch = ui.switch(value=config.measurement.temp_anomaly_enabled, on_change=lambda e: _toggle_temp_anomaly_fields(e.value)).props('dense') \
+                                        .tooltip('啟用後會檢查每次量測值是否在「溫度上下限」範圍內，超出會跳警報並寫 PLC D513.bit12。常用於防呆（避免量到 5°C 或 50°C 這類異常值）')
                                 with ui.column().classes('w-full gap-2') as ta_fields:
                                     temp_anomaly_fields = ta_fields
                                     ta_fields.set_visibility(config.measurement.temp_anomaly_enabled)
                                     with ui.row().classes('items-center'):
                                         ui.label('溫度上限:').classes('text-gray-300 w-28')
-                                        temp_anomaly_upper_input = ui.number(value=config.measurement.temp_anomaly_upper, format='%.1f', step=0.1).props('outlined dense suffix=°C').classes('w-24')
+                                        temp_anomaly_upper_input = ui.number(value=config.measurement.temp_anomaly_upper, format='%.1f', step=0.1).props('outlined dense suffix=°C').classes('w-24') \
+                                            .tooltip('溫度異常檢查的上限值。量測值高於此即觸發警報（預設 42°C，正常人體溫不會超過此值）')
                                     with ui.row().classes('items-center'):
                                         ui.label('溫度下限:').classes('text-gray-300 w-28')
-                                        temp_anomaly_lower_input = ui.number(value=config.measurement.temp_anomaly_lower, format='%.1f', step=0.1).props('outlined dense suffix=°C').classes('w-24')
+                                        temp_anomaly_lower_input = ui.number(value=config.measurement.temp_anomaly_lower, format='%.1f', step=0.1).props('outlined dense suffix=°C').classes('w-24') \
+                                            .tooltip('溫度異常檢查的下限值。量測值低於此即觸發警報（預設 30°C，低於此可能是耳溫槍故障或沒對到耳朵）')
                                 # --- 連續無套異常設定 ---
                                 ui.separator().classes('my-1')
                                 with ui.row().classes('items-center'):
                                     ui.label('連續無套:').classes('text-gray-300 w-28')
-                                    no_cover_anomaly_switch = ui.switch(value=config.measurement.no_cover_anomaly_enabled, on_change=lambda e: _toggle_no_cover_anomaly_fields(e.value)).props('dense')
+                                    no_cover_anomaly_switch = ui.switch(value=config.measurement.no_cover_anomaly_enabled, on_change=lambda e: _toggle_no_cover_anomaly_fields(e.value)).props('dense') \
+                                        .tooltip('啟用後追蹤同一通道連續量測到「無耳套」的次數，達到設定次數會跳警報。用於提醒操作員耳套可能漏裝或裝歪')
                                 with ui.column().classes('w-full gap-2') as nc_fields:
                                     no_cover_anomaly_fields = nc_fields
                                     nc_fields.set_visibility(config.measurement.no_cover_anomaly_enabled)
                                     with ui.row().classes('items-center'):
                                         ui.label('連續次數:').classes('text-gray-300 w-28')
-                                        no_cover_anomaly_count_input = ui.number(value=config.measurement.no_cover_anomaly_count, format='%d', step=1, min=1).props('outlined dense suffix=次').classes('w-24')
+                                        no_cover_anomaly_count_input = ui.number(value=config.measurement.no_cover_anomaly_count, format='%d', step=1, min=1).props('outlined dense suffix=次').classes('w-24') \
+                                            .tooltip('連續無套達到此次數時觸發警報（預設 3 次）。任何一次量到有套會把該通道計數歸 0')
                             ui.label('運行模式:').classes('text-gray-300 w-28')
-                            mode_select = ui.select(options=['master', 'slave'], value=config.network.mode).props('outlined dense').classes('w-32')
+                            mode_select = ui.select(options=['master', 'slave'], value=config.network.mode).props('outlined dense').classes('w-32') \
+                                .tooltip('Master: 主機，連 PLC + 6 支耳溫槍；Slave: 副機，連 6 支並透過 TCP 回報 Master。修改後需重啟程式')
                     # --- 網路設定 ---
                     with ui.expansion('網路設定', icon='lan').classes('w-full bg-slate-800'):
                         with ui.column().classes('w-full gap-2 p-2'):
                             with ui.row().classes('items-center'):
                                 ui.label('Master IP:').classes('text-gray-300 w-28')
-                                net_inputs['master_ip'] = ui.input(value=config.network.master_ip).props('outlined dense').classes('w-36')
+                                net_inputs['master_ip'] = ui.input(value=config.network.master_ip).props('outlined dense').classes('w-36') \
+                                    .tooltip('Master 主機的 IP 位址。Slave 模式下用此 IP 連線 Master；Master 模式下此值僅供記錄')
                             with ui.row().classes('items-center'):
                                 ui.label('Port:').classes('text-gray-300 w-28')
-                                net_inputs['port'] = ui.number(value=config.network.port).props('outlined dense').classes('w-24')
+                                net_inputs['port'] = ui.number(value=config.network.port).props('outlined dense').classes('w-24') \
+                                    .tooltip('Master/Slave 通訊埠（雙方須一致），預設 5001')
                     if is_master:
                         # --- 時序設定 ---
                         with ui.expansion('時序設定', icon='timer').classes('w-full bg-slate-800'):
                             with ui.column().classes('w-full gap-2 p-2'):
+                                _timing_tips = {
+                                    'empty_collect_delay': 'PLC D515 觸發後，等待此時間再從藍芽抓空槍值。太短可能取到舊值；太長會讓流程變慢',
+                                    'measure_collect_delay': 'PLC D500 觸發後，等待此時間再從藍芽抓量測值。太短可能取到舊值；太長會讓流程變慢',
+                                }
                                 for k, v in [('empty_collect_delay', '空槍收集延遲'), ('measure_collect_delay', '量測收集延遲')]:
                                     with ui.row().classes('items-center'):
                                         ui.label(v + ':').classes('text-gray-300 w-28')
-                                        timing_inputs[k] = ui.number(value=getattr(config.timing, k), format='%.2f', min=0, max=10, step=0.1).props('outlined dense suffix=秒').classes('w-24')
+                                        timing_inputs[k] = ui.number(value=getattr(config.timing, k), format='%.2f', min=0, max=10, step=0.1).props('outlined dense suffix=秒').classes('w-24') \
+                                            .tooltip(_timing_tips[k])
                         # --- PLC 設定 ---
                         with ui.expansion('PLC 設定', icon='memory').classes('w-full bg-slate-800'):
                             with ui.column().classes('w-full gap-2 p-2'):
                                 with ui.row().classes('items-center'):
                                     ui.label('IP 位址:').classes('text-gray-300 w-28')
-                                    plc_inputs['ip_address'] = ui.input(value=config.plc.ip_address).props('outlined dense').classes('w-36')
+                                    plc_inputs['ip_address'] = ui.input(value=config.plc.ip_address).props('outlined dense').classes('w-36') \
+                                        .tooltip('PLC FX5U 的 IP 位址')
                                 with ui.row().classes('items-center'):
                                     ui.label('Port:').classes('text-gray-300 w-28')
-                                    plc_inputs['port'] = ui.number(value=config.plc.port).props('outlined dense').classes('w-24')
+                                    plc_inputs['port'] = ui.number(value=config.plc.port).props('outlined dense').classes('w-24') \
+                                        .tooltip('PLC SLMP 通訊埠（FX5U 預設 5000）')
                     # --- 模擬模式 (PLC / 藍芽各自獨立) ---
                     with ui.expansion('模擬模式', icon='science').classes('w-full bg-slate-800'):
                         with ui.column().classes('w-full gap-2 p-2'):
@@ -1944,10 +1983,12 @@ def build_settings_drawer():
                             if is_master:
                                 with ui.row().classes('items-center'):
                                     ui.label('PLC 模擬:').classes('text-gray-300 w-28')
-                                    plc_sim_switch = ui.switch(value=config.plc_simulation_mode).props('dense')
+                                    plc_sim_switch = ui.switch(value=config.plc_simulation_mode).props('dense') \
+                                        .tooltip('開啟後不需實體 PLC 即可測試流程；PLC 寫入/讀取會走內建模擬資料')
                             with ui.row().classes('items-center'):
                                 ui.label('藍芽模擬:').classes('text-gray-300 w-28')
-                                bt_sim_switch = ui.switch(value=config.bt_simulation_mode).props('dense')
+                                bt_sim_switch = ui.switch(value=config.bt_simulation_mode).props('dense') \
+                                    .tooltip('開啟後不需實體耳溫槍即可測試流程；藍芽會回傳模擬溫度值')
                     # --- 遠端記錄 (log / alarm 路徑各自獨立) ---
                     with ui.expansion('遠端記錄', icon='cloud_upload').classes('w-full bg-slate-800'):
                         with ui.column().classes('w-full gap-2 p-2'):
@@ -1955,17 +1996,19 @@ def build_settings_drawer():
                             with ui.row().classes('items-center w-full gap-2'):
                                 ui.label('Log 路徑:').classes('text-gray-300 w-28')
                                 remote_log_dir_input = ui.input(value=config.remote_log_dir, placeholder=r'例如 \\NAS\hmi\log') \
-                                    .props('outlined dense').classes('flex-grow')
+                                    .props('outlined dense').classes('flex-grow') \
+                                    .tooltip('遠端 cycle log 寫入路徑（簡化版：批號/時間/TOTAL OK/TOTAL NG）。寫入失敗會背景重試，不影響本機 log')
                                 ui.button(icon='folder_open',
                                           on_click=lambda: _pick_directory(remote_log_dir_input, '選擇遠端 Log 資料夾')) \
-                                    .props('flat color=blue dense').tooltip('瀏覽資料夾')
+                                    .props('flat color=blue dense').tooltip('用系統對話框瀏覽選擇資料夾')
                             with ui.row().classes('items-center w-full gap-2'):
                                 ui.label('Alarm 路徑:').classes('text-gray-300 w-28')
                                 remote_alarm_dir_input = ui.input(value=config.remote_alarm_dir, placeholder=r'例如 \\NAS\hmi\alarm') \
-                                    .props('outlined dense').classes('flex-grow')
+                                    .props('outlined dense').classes('flex-grow') \
+                                    .tooltip('遠端 alarm 寫入路徑（異常完整紀錄）。寫入失敗會背景重試，不影響本機 alarm')
                                 ui.button(icon='folder_open',
                                           on_click=lambda: _pick_directory(remote_alarm_dir_input, '選擇遠端 Alarm 資料夾')) \
-                                    .props('flat color=blue dense').tooltip('瀏覽資料夾')
+                                    .props('flat color=blue dense').tooltip('用系統對話框瀏覽選擇資料夾')
 
                 # === 不需要密碼的區塊 ===
                 with ui.expansion('藍芽設定', icon='bluetooth').classes('w-full bg-slate-800'):
@@ -1976,22 +2019,28 @@ def build_settings_drawer():
                             addr = config.bluetooth.device_addresses[idx] if idx < len(config.bluetooth.device_addresses) else ""
                             with ui.row().classes('items-center'):
                                 ui.label(f'{get_channel_display_name(ch)}:').classes('text-gray-300 w-14')
-                                bt_mac_inputs[ch] = ui.input(value=addr, placeholder='XX:XX:XX:XX:XX:XX').props('outlined dense').classes('flex-grow')
+                                bt_mac_inputs[ch] = ui.input(value=addr, placeholder='XX:XX:XX:XX:XX:XX').props('outlined dense').classes('flex-grow') \
+                                    .tooltip(f'{get_channel_display_name(ch)} 對應的耳溫槍藍芽 MAC 位址。留空代表停用此通道的藍芽連線')
                         with ui.row().classes('items-center'):
                             ui.label('重連間隔:').classes('text-gray-300 w-28')
-                            bt_inputs['reconnect_interval'] = ui.number(value=config.bluetooth.reconnect_interval).props('outlined dense suffix=秒').classes('w-24')
+                            bt_inputs['reconnect_interval'] = ui.number(value=config.bluetooth.reconnect_interval).props('outlined dense suffix=秒').classes('w-24') \
+                                .tooltip('藍芽斷線後等待多久再嘗試重連，秒')
                         with ui.row().classes('items-center'):
                             ui.label('超時:').classes('text-gray-300 w-28')
-                            bt_inputs['timeout'] = ui.number(value=config.bluetooth.timeout).props('outlined dense suffix=秒').classes('w-24')
+                            bt_inputs['timeout'] = ui.number(value=config.bluetooth.timeout).props('outlined dense suffix=秒').classes('w-24') \
+                                .tooltip('藍芽連線等待逾時時間，秒')
                 with ui.expansion('通道啟用', icon='toggle_on').classes('w-full bg-slate-800'):
                     ch_range = range(1, 13) if is_master else range(7, 13)
                     with ui.grid(columns=6).classes('w-full gap-1'):
                         for i in ch_range:
                             with ui.column().classes('items-center'):
                                 ui.label(get_channel_display_name(i)).classes('text-gray-300 text-[10px]')
-                                channel_switches[i] = ui.switch(value=config.measurement.channel_enabled[i-1]).props('dense')
-                ui.button('儲存進階設定', on_click=on_save_advanced_settings).props('color=blue icon=save').classes('w-full mt-4')
-                ui.button('更新資料 (即時套用)', on_click=on_apply_settings).props('color=green icon=sync').classes('w-full mt-2')
+                                channel_switches[i] = ui.switch(value=config.measurement.channel_enabled[i-1]).props('dense') \
+                                    .tooltip(f'啟用 {get_channel_display_name(i)}。停用後該通道不參與量測判定，外觀變灰')
+                ui.button('儲存進階設定', on_click=on_save_advanced_settings).props('color=blue icon=save').classes('w-full mt-4') \
+                    .tooltip('儲存目前所有設定到 config.json；模擬模式或 IP 變更等需重啟才會完全生效')
+                ui.button('更新資料 (即時套用)', on_click=on_apply_settings).props('color=green icon=sync').classes('w-full mt-2') \
+                    .tooltip('儲存設定並即時套用到執行中的管理器（不需重啟程式）')
 
 def build_meter_block(title: str, start_ch: int, end_ch: int, border_color: str = 'blue'):
     is_master = config.network.mode == "master"
@@ -2029,7 +2078,7 @@ def build_meter_block(title: str, start_ch: int, end_ch: int, border_color: str 
             meters_ui[i] = {'row_container': row_container, 'disabled_badge': disabled_badge, 'bt_icon': bt_icon, 'ear_cover': ear_cover_label, 'empty_display': empty_display, 'temp_display': temp_display, 'error_display': error_display, 'light': status_light, 'text': status_text, 'ok_display': ok_display, 'ng_display': ng_display, 'no_cover_count': no_cover_count_label}
 
 def build_ui():
-    global meters_ui, log_console, plc_status_icon, network_status_icon, alert_container, alert_message_label, system_status_label, measure_status_label, plc_monitor_ui, batch_no_input, total_ok_label, total_ng_label
+    global meters_ui, log_console, plc_status_icon, network_status_icon, alert_container, alert_message_label, system_status_label, measure_status_label, plc_monitor_ui, batch_no_input, total_ok_label, total_ng_label, temp_anomaly_status_label, no_cover_anomaly_status_label
     is_master = config.network.mode == "master"
     ui.colors(primary='#5898d4', secondary='#26a69a', accent='#9c27b0', dark='#1d1d1d')
     ui.add_head_html('<style>body { user-select: text !important; -webkit-user-select: text !important; }</style>')
@@ -2056,6 +2105,21 @@ def build_ui():
                             with ui.row().classes('items-center gap-2 bg-slate-800 px-4 py-1 rounded-full border border-red-700'):
                                 ui.label('TOTAL NG:').classes('text-gray-300 text-lg')
                                 total_ng_label = ui.label('0').classes('text-red-400 text-2xl font-bold font-mono')
+                        # 量測流程狀態 (master / slave 都顯示)
+                        with ui.row().classes('items-center gap-2 bg-slate-800 px-4 py-1 rounded-full border border-gray-700 ml-2'):
+                            ui.label('量測流程:').classes('text-gray-300 text-lg')
+                            _initial_state_text = "待機中"
+                            if measure_manager:
+                                _state_map = {
+                                    MeasurementState.IDLE: "待機中",
+                                    MeasurementState.WAITING_EMPTY: "等待空槍",
+                                    MeasurementState.EMPTY_DONE: "空槍完成",
+                                    MeasurementState.WAITING_MEASURE: "等待量測",
+                                    MeasurementState.MEASURING: "計算中",
+                                    MeasurementState.COMPLETE: "量測完成",
+                                }
+                                _initial_state_text = _state_map.get(measure_manager.state, "待機中")
+                            measure_status_label = ui.label(_initial_state_text).classes('text-gray-400 text-2xl font-bold')
                     with ui.row().classes('items-center gap-4'):
                         if is_master:
                             with ui.row().classes('items-center gap-2'):
@@ -2065,7 +2129,8 @@ def build_ui():
                             ui.label('網路:').classes('text-gray-300 text-xl')
                             network_status_icon = ui.icon('circle', color='gray').classes('text-2xl')
                         ui.button(icon='settings', on_click=toggle_settings) \
-                            .props('flat round color=white size=lg')
+                            .props('flat round color=white size=lg') \
+                            .tooltip('開啟 / 關閉進階設定面板（部分項目需密碼登入）')
 
                 ui.separator().classes('bg-slate-700')
 
@@ -2078,12 +2143,13 @@ def build_ui():
                                 batch_no_input = ui.input(value=config.batch_no, placeholder='英數字') \
                                     .props('outlined dense dark maxlength=20') \
                                     .props('input-class="text-blue-300 font-mono text-lg"') \
-                                    .classes('w-56')
+                                    .classes('w-56') \
+                                    .tooltip('輸入當前批號（限英數字、底線、連字號），改完務必按右側 SAVE 才會套用；未按 SAVE 滑鼠移開會自動還原原值')
                                 # 失焦時若未按 SAVE 則還原；延遲 150ms 等 SAVE 的 click 先觸發
                                 batch_no_input.on('blur', lambda e: _schedule_batch_revert())
                                 ui.button(icon='save', on_click=on_batch_no_commit) \
                                     .props('color=blue dense flat round size=sm') \
-                                    .tooltip('設定批號')
+                                    .tooltip('套用批號 — 之後每筆量測 log 列首會帶此批號，並寫入 config.json')
                             with ui.row().classes('items-center gap-2 bg-slate-800 px-4 py-1 rounded-full border border-gray-700'):
                                 ui.label('週期:').classes('text-gray-400 text-lg')
                                 plc_monitor_ui['cycle_val_top'] = ui.label('0').classes('text-yellow-400 text-2xl font-bold font-mono')
@@ -2100,28 +2166,48 @@ def build_ui():
                             with ui.row().classes('items-center gap-2 bg-slate-800 px-4 py-1 rounded-full border border-gray-700'):
                                 ui.label('暖槍:').classes('text-gray-400 text-lg')
                                 plc_monitor_ui['warmup_label'] = ui.label('OFF').classes('text-gray-400 text-2xl font-bold')
-                    if is_master:
-                        with ui.row().classes('items-center gap-2'):
+                            # 溫度異常使用狀態 (master only)
+                            with ui.row().classes('items-center gap-2 bg-slate-800 px-4 py-1 rounded-full border border-gray-700') as _ta_pill:
+                                ui.label('溫度異常:').classes('text-gray-400 text-lg')
+                                _ta_on = config.measurement.temp_anomaly_enabled
+                                temp_anomaly_status_label = ui.label('ON' if _ta_on else 'OFF') \
+                                    .classes(('text-green-400' if _ta_on else 'text-gray-500') + ' text-2xl font-bold')
+                            _ta_pill.tooltip('防呆檢查：量測到的絕對溫度若不在「溫度上下限」範圍內 (預設 30~42°C) 會觸發警報並寫 PLC D513 異常旗標。在進階設定中啟用/停用')
+                            # 連續無套使用狀態 (master only)
+                            with ui.row().classes('items-center gap-2 bg-slate-800 px-4 py-1 rounded-full border border-gray-700') as _nc_pill:
+                                ui.label('連續無套:').classes('text-gray-400 text-lg')
+                                _nc_on = config.measurement.no_cover_anomaly_enabled
+                                no_cover_anomaly_status_label = ui.label('ON' if _nc_on else 'OFF') \
+                                    .classes(('text-green-400' if _nc_on else 'text-gray-500') + ' text-2xl font-bold')
+                            _nc_pill.tooltip('追蹤同一通道連續量測到「無套」的次數，達到設定次數時觸發警報。在進階設定中啟用/停用')
+                    with ui.row().classes('items-center gap-2'):
+                        ui.button('清空系統Log', icon='delete', on_click=lambda: log_console.clear()) \
+                            .props('color=grey dense size=md').classes('px-3') \
+                            .tooltip('清除畫面上的訊息歷史顯示（不影響本機 CSV log 檔案內容）')
+                        if is_master:
                             ui.button('計數歸零', icon='exposure_zero', on_click=on_reset_count_click) \
-                                .props('color=orange dense size=md').classes('px-3')
+                                .props('color=orange dense size=md').classes('px-3') \
+                                .tooltip('把 PLC OK/NG 計數 (D517~D540) 全部清為 0，並更新 last_reset_date；按下會先彈出確認視窗')
                             ui.button('異常復歸', icon='restart_alt', on_click=on_reset_button_click) \
-                                .props('color=amber text-color=black dense size=md').classes('px-3')
+                                .props('color=amber text-color=black dense size=md').classes('px-3') \
+                                .tooltip('清除 PLC D513 異常旗標、各通道 highlight 與警報橫幅；不影響 OK/NG 計數')
                             ui.button('流程解卡', icon='build_circle', on_click=on_force_clear_triggers) \
                                 .props('color=red dense size=md outline').classes('px-3') \
-                                .tooltip('強制將 D500/D515 寫 0，僅在流程卡住時使用')
+                                .tooltip('強制將 D500/D515 寫 0 並重置量測狀態機，僅在流程卡住時使用')
         with ui.card().classes('w-full bg-red-600 p-3 border-2 border-red-400') as container:
             alert_container = container; alert_container.set_visibility(False)
             with ui.row().classes('w-full items-center justify-between'):
                 with ui.row().classes('items-center gap-3'):
                     ui.icon('warning', size='lg', color='white')
                     alert_message_label = ui.label('').classes('text-2xl text-white font-bold')
-                ui.button('確認', on_click=stop_alert_flash).props('color=white text-color=red dense size=lg').classes('px-6')
+                ui.button('確認', on_click=stop_alert_flash).props('color=white text-color=red dense size=lg').classes('px-6') \
+                    .tooltip('停止警報閃爍並隱藏紅色橫幅；不會解除實際異常（請按「異常復歸」）')
         with ui.row().classes('w-full items-start gap-3'):
             if is_master: build_meter_block('本機通道 (CH11, 9, 7, 5, 3, 1)', 1, 6, 'blue')
             if is_master: build_meter_block('Slave 通道 (CH12, 10, 8, 6, 4, 2)', 7, 12, 'orange')
             else: build_meter_block('本機通道 (CH12, 10, 8, 6, 4, 2)', 7, 12, 'orange')
-            with ui.column().classes('flex-grow gap-3').style('max-width: 450px'):
-                with ui.card().classes('w-full bg-slate-800 p-3'):
+            with ui.row().classes('flex-grow items-start gap-3 flex-wrap'):
+                with ui.card().classes('bg-slate-800 p-3'):
                     ui.label('目前設定').classes('text-lg text-white font-bold mb-2')
                     with ui.row().classes('items-center gap-4'):
                         ui.label('上限:').classes('text-gray-400 text-base')
@@ -2134,30 +2220,14 @@ def build_ui():
                             current_settings_labels['empty_upper'] = ui.label(f'{config.measurement.empty_upper:.1f}°C').classes('text-orange-400 text-xl font-bold')
                             ui.label('空槍下限:').classes('text-gray-400 text-base')
                             current_settings_labels['empty_lower'] = ui.label(f'{config.measurement.empty_lower:.1f}°C').classes('text-cyan-400 text-xl font-bold')
-                with ui.card().classes('w-full bg-slate-800 p-3'):
-                    with ui.row().classes('w-full items-center justify-between mb-2'):
-                        ui.label('量測流程').classes('text-lg text-white font-bold')
-                        # 根據實際量測狀態設定初始文字
-                        state_text = "待機中"
-                        if measure_manager:
-                            state_map = {
-                                MeasurementState.IDLE: "待機中",
-                                MeasurementState.WAITING_EMPTY: "等待空槍",
-                                MeasurementState.EMPTY_DONE: "空槍完成",
-                                MeasurementState.WAITING_MEASURE: "等待量測",
-                                MeasurementState.MEASURING: "計算中",
-                                MeasurementState.COMPLETE: "量測完成",
-                            }
-                            state_text = state_map.get(measure_manager.state, "待機中")
-                        measure_status_label = ui.label(state_text).classes('text-gray-400 text-xl font-bold')
-                    with ui.row().classes('w-full gap-2'):
-                        ui.button('清空Log', on_click=lambda: log_console.clear()).props('color=grey icon=delete size=lg').classes('text-lg')
                 if is_master:
-                    with ui.card().classes('w-full bg-slate-700 p-3'):
+                    with ui.card().classes('bg-slate-700 p-3'):
                         ui.label('手動觸發').classes('text-lg text-yellow-400 font-bold mb-2')
                         with ui.row().classes('gap-2'):
-                            ui.button('空槍量測', on_click=on_simulate_empty).props('color=cyan icon=science size=lg')
-                            ui.button('溫度量測', on_click=on_simulate_measure).props('color=orange icon=thermostat size=lg')
+                            ui.button('空槍量測', on_click=on_simulate_empty).props('color=cyan icon=science size=lg') \
+                                .tooltip('模擬 PLC 寫入 D515=1，啟動空槍量測流程；用於模擬模式或 PLC 未接時測試')
+                            ui.button('溫度量測', on_click=on_simulate_measure).props('color=orange icon=thermostat size=lg') \
+                                .tooltip('模擬 PLC 寫入 D500=1，啟動溫度量測流程；用於模擬模式或 PLC 未接時測試')
         with ui.row().classes('w-full items-stretch gap-3'):
             if is_master:
                 with ui.card().classes('bg-slate-800 p-3').style('min-width: 320px'):
