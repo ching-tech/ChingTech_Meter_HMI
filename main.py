@@ -14,6 +14,7 @@ import datetime
 import threading
 import asyncio
 import time
+import queue
 
 # --- CMD 輸出同時寫入 log 檔 ---
 class _TeeWriter:
@@ -86,6 +87,7 @@ plc_sim_switch = None       # 設定頁的 PLC 模擬模式開關
 bt_sim_switch = None        # 設定頁的藍芽模擬模式開關
 remote_log_dir_input = None    # 遠端 log 路徑輸入框
 remote_alarm_dir_input = None  # 遠端 alarm 路徑輸入框
+_startup_reset_checked = False  # 啟動時跨日歸零檢查只執行一次
 plc_monitor_ui = {}
 system_running = False
 slave_channel_enabled = {}  # Slave 回報的通道啟用狀態 {ch: bool}
@@ -308,26 +310,134 @@ def _write_alarm_line(alarm_dir: str, today: str, line: str, machine_suffix: str
             f.write(line)
         print(f"[!] Alarm CSV 被鎖定，已寫入備用: {os.path.basename(fallback)}")
 
+# --- 遠端 Alarm 非同步佇列 ---
+# 本機寫入維持同步 (磁碟 ~1ms 不會卡)；遠端 SMB 改 daemon thread 避免阻塞 UI/量測流程。
+# 失敗時用指數退避重試 (1, 2, 4, 8, 16, 32, 60, 60...)，永不放棄；若遠端持續離線，
+# 佇列會累積 (alarm 量低，實務上不會爆)。
+_alarm_remote_queue: "queue.Queue" = queue.Queue()
+
+def _alarm_remote_worker():
+    """背景 thread：消費 alarm 佇列，把 alarm 寫到遠端資料夾。"""
+    while True:
+        try:
+            item = _alarm_remote_queue.get()
+            if item is None:  # 關機 poison pill (目前未啟用)
+                break
+            path, today, line, machine_suffix, attempt = item
+            try:
+                _write_alarm_line(path, today, line, machine_suffix=machine_suffix)
+                if attempt > 0:
+                    print(f"[*] 遠端 alarm 寫入恢復成功 (重試第 {attempt} 次)")
+            except Exception as e:
+                backoff = min(60, 2 ** attempt)
+                print(f"[!] 遠端 alarm 寫入失敗 (第 {attempt + 1} 次嘗試，{backoff}s 後重試): {e}")
+                time.sleep(backoff)
+                _alarm_remote_queue.put((path, today, line, machine_suffix, attempt + 1))
+        except Exception as e:
+            print(f"[!!] alarm worker 未預期錯誤: {e}")
+
+threading.Thread(target=_alarm_remote_worker, daemon=True, name="AlarmRemoteWorker").start()
+
+
+# --- 遠端 Cycle Log 非同步佇列 ---
+# 同樣的設計：本機 log 維持同步寫；遠端 summary log (批號/時間/TOTAL OK/TOTAL NG) 改 daemon thread。
+# 失敗指數退避重試，永不放棄；佇列累積到上限後拒絕新筆 (本機 log 仍正常寫，不影響資料完整性)。
+# 上限 100000 ≈ 3 秒/筆 × 約 83 小時，遠超過單班斷線時間；本機 log 永遠是 source of truth。
+_remote_log_queue: "queue.Queue" = queue.Queue(maxsize=100000)
+
+
+def _write_remote_summary_line(remote_dir: str, machine_name: str,
+                               batch_no: str, time_str: str,
+                               total_ok: int, total_ng: int):
+    """把一筆簡化版 cycle log 寫到遠端 summary CSV (檔名加機台名與日期)。"""
+    os.makedirs(remote_dir, exist_ok=True)
+    date_str = datetime.datetime.now().strftime("%Y%m%d")
+    safe_machine = (machine_name or "Machine").strip() or "Machine"
+    filename = f"summary_log_{date_str}_{safe_machine}.csv"
+    filepath = os.path.join(remote_dir, filename)
+    write_header = not os.path.exists(filepath)
+    with open(filepath, 'a', newline='', encoding='utf-8-sig') as f:
+        import csv as _csv
+        writer = _csv.writer(f)
+        if write_header:
+            writer.writerow(['批號', '時間', 'TOTAL OK', 'TOTAL NG'])
+        writer.writerow([batch_no or "", time_str, total_ok, total_ng])
+
+
+def _remote_log_worker():
+    """背景 thread：消費 cycle log 佇列，寫到遠端資料夾，失敗指數退避重試。"""
+    while True:
+        try:
+            item = _remote_log_queue.get()
+            if item is None:
+                break
+            remote_dir, machine_name, batch_no, time_str, total_ok, total_ng, attempt = item
+            try:
+                _write_remote_summary_line(remote_dir, machine_name, batch_no,
+                                           time_str, total_ok, total_ng)
+                if attempt > 0:
+                    print(f"[*] 遠端 cycle log 寫入恢復成功 (重試第 {attempt} 次)")
+            except Exception as e:
+                backoff = min(60, 2 ** attempt)
+                print(f"[!] 遠端 cycle log 寫入失敗 (第 {attempt + 1} 次嘗試，{backoff}s 後重試): {e}")
+                time.sleep(backoff)
+                try:
+                    _remote_log_queue.put_nowait(
+                        (remote_dir, machine_name, batch_no, time_str, total_ok, total_ng, attempt + 1)
+                    )
+                except queue.Full:
+                    print(f"[!!] 遠端 cycle log 佇列已滿，丟棄重試任務以避免無限累積")
+        except Exception as e:
+            print(f"[!!] cycle log worker 未預期錯誤: {e}")
+
+
+threading.Thread(target=_remote_log_worker, daemon=True, name="RemoteLogWorker").start()
+
+
+def _enqueue_remote_cycle_log(plc_data):
+    """把當下這筆 cycle 的 summary 資料丟進遠端 log 佇列；無 remote_log_dir 直接 skip"""
+    if not config.remote_log_dir:
+        return
+    time_str = datetime.datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+    total_ok = sum(plc_data.ok_counts[:12]) if plc_data else 0
+    total_ng = sum(plc_data.ng_counts[:12]) if plc_data else 0
+    try:
+        _remote_log_queue.put_nowait((
+            config.remote_log_dir,
+            config.machine_name,
+            config.batch_no,
+            time_str,
+            total_ok,
+            total_ng,
+            0,  # attempt
+        ))
+    except queue.Full:
+        print("[!!] 遠端 cycle log 佇列已滿 (10000 筆)，本筆 summary 已丟棄；本機 log 不受影響")
+
+
 def write_alarm_log(message: str, alarm_type: str = "其他"):
-    """寫入歷史異常紀錄 CSV (一天一個檔案)，本機 + 遠端 (若有設定)"""
+    """寫入歷史異常紀錄 CSV (一天一個檔案)：本機同步 + 遠端 async (丟佇列)"""
     today = datetime.datetime.now().strftime("%Y%m%d")
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     safe_message = message.replace('"', '""')
     line = f'{timestamp},{alarm_type},"{safe_message}"\n'
 
-    # 本機寫入 (固定路徑)
+    # 本機寫入 (同步，固定路徑)
     try:
         _write_alarm_line(r"D:\logs\Alarm", today, line)
     except Exception as e:
         print(f"[!] 寫入本機 Alarm Log 失敗: {e}")
 
-    # 遠端寫入：使用者指定的 alarm 資料夾 (完整路徑)，檔名加機台名以避免多台機共用資料夾時衝突
+    # 遠端寫入：丟進佇列由 daemon worker 處理，呼叫端不阻塞
     if config.remote_alarm_dir:
-        try:
-            safe_machine = (config.machine_name or "Machine").strip() or "Machine"
-            _write_alarm_line(config.remote_alarm_dir, today, line, machine_suffix=f"_{safe_machine}")
-        except Exception as e:
-            print(f"[!] 寫入遠端 Alarm Log 失敗: {e}")
+        safe_machine = (config.machine_name or "Machine").strip() or "Machine"
+        _alarm_remote_queue.put((
+            config.remote_alarm_dir,
+            today,
+            line,
+            f"_{safe_machine}",
+            0,  # attempt 計數
+        ))
 
 def show_alert(message: str, alarm_type: str = "其他"):
     """顯示通用警報"""
@@ -823,9 +933,11 @@ def on_measurement_complete(result):
             enabled_channels=get_enabled_channel_list(),
             batch_no=config.batch_no,
             machine_name=config.machine_name,
-            remote_log_dir=config.remote_log_dir,
         )
         log_message(f"[流程] 量測 Log 寫入: {'成功' if log_saved else '失敗'}")
+        # 遠端簡化版 log → 丟佇列由 worker 非同步處理 (不阻塞量測流程)
+        if log_saved:
+            _enqueue_remote_cycle_log(plc_manager.plc_data if plc_manager else None)
 
     if plc_manager:
         # 0=不使用, 1=FAIL, 2=PASS
@@ -930,22 +1042,59 @@ def on_force_clear_triggers():
             ui.button('確認解卡', icon='build_circle', on_click=do_clear).props('color=red')
     dialog.open()
 
+def _maybe_daily_reset_on_startup():
+    """啟動連上 PLC 後執行一次跨日檢查：
+       - last_reset_date 與今日相同 → 沿用既有計數 (避免同日重啟把累積數歸零)
+       - 不同 → 自動歸零並更新日期
+       PLC 寫入失敗時 flag 保持 False，下次 poll 看到 CONNECTED 會重試。
+    """
+    global _startup_reset_checked
+    if _startup_reset_checked:
+        return
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+    last = (config.last_reset_date or "").strip()
+    if last == today:
+        log_message(f"[啟動] 與上次歸零同日 ({today})，沿用 PLC 既有計數")
+        _startup_reset_checked = True
+        return
+    log_message(f"[啟動] 跨日自動歸零 (上次: {last or '無紀錄'} → 今日: {today})")
+    if _do_reset_counts(reason="啟動跨日自動歸零"):
+        _startup_reset_checked = True
+    # 若失敗，flag 保持 False，下次 update_plc_display 看到 CONNECTED 時會重試
+
+def _do_reset_counts(reason: str) -> bool:
+    """共用歸零邏輯：寫 PLC 0 + 清 UI；只在 PLC 寫入成功時才更新 last_reset_date 並存檔。
+    回傳 True 表示 PLC 寫入成功 (或無 plc_manager 時視同成功)；False 表示寫入失敗。"""
+    plc_ok = True
+    if plc_manager:
+        plc_ok = plc_manager.write_ok_ng_counts([0] * 12, [0] * 12)
+    # UI 一律更新 (給使用者即時視覺回饋；PLC 重連後若值不一致會被 poll 蓋回正確值)
+    for meter in meters_ui.values():
+        if meter.get('ok_display'):
+            meter['ok_display'].set_value(0)
+        if meter.get('ng_display'):
+            meter['ng_display'].set_value(0)
+    if total_ok_label is not None:
+        total_ok_label.set_text('0')
+    if total_ng_label is not None:
+        total_ng_label.set_text('0')
+    if plc_ok:
+        today = datetime.datetime.now().strftime("%Y-%m-%d")
+        config.last_reset_date = today
+        save_config(config)
+        log_message(f"[計數] 已歸零並記錄日期 {today} (原因: {reason})")
+    else:
+        log_message(f"[計數] PLC 寫入失敗，未更新 last_reset_date，連線恢復後會自動重試 (原因: {reason})")
+    return plc_ok
+
 def on_reset_count_click():
     """點擊『計數歸零』按鈕：先彈出確認視窗，確認後才執行歸零"""
     def do_reset():
-        if plc_manager:
-            plc_manager.write_ok_ng_counts([0] * 12, [0] * 12)
-        for meter in meters_ui.values():
-            if meter.get('ok_display'):
-                meter['ok_display'].set_value(0)
-            if meter.get('ng_display'):
-                meter['ng_display'].set_value(0)
-        if total_ok_label is not None:
-            total_ok_label.set_text('0')
-        if total_ng_label is not None:
-            total_ng_label.set_text('0')
-        ui.notify("OK/NG 計數已歸零", type='positive')
-        log_message("使用者執行計數歸零")
+        ok = _do_reset_counts(reason="使用者手動歸零")
+        if ok:
+            ui.notify("OK/NG 計數已歸零", type='positive')
+        else:
+            ui.notify("PLC 寫入失敗：UI 已歸零但 PLC 未清，連線恢復後請再按一次", type='warning')
         dialog.close()
 
     with ui.dialog() as dialog, ui.card().classes('bg-slate-800'):
@@ -1074,8 +1223,10 @@ def collect_empty_values():
             enabled_channels=get_enabled_channel_list(),
             batch_no=config.batch_no,
             machine_name=config.machine_name,
-            remote_log_dir=config.remote_log_dir,
         )
+        # 遠端簡化版 log → 丟佇列由 worker 非同步處理
+        if log_saved:
+            _enqueue_remote_cycle_log(plc_manager.plc_data if plc_manager else None)
 
     update_plc_display()
     if plc_manager and log_saved:
@@ -1534,6 +1685,9 @@ def update_plc_display():
         if s == PLCConnectionState.CONNECTED: plc_status_icon.props('color=green')
         elif s == PLCConnectionState.CONNECTING: plc_status_icon.props('color=yellow')
         else: plc_status_icon.props('color=red')
+        # PLC 第一次連線成功時，做跨日歸零檢查 (整個程式生命週期只跑一次)
+        if s == PLCConnectionState.CONNECTED:
+            _maybe_daily_reset_on_startup()
     for ch in bt_mgr.devices.keys(): update_meter_bt_status(ch, bt_mgr.get_device_state(ch))
 
     # 檢查 D500/D515 觸發超時（15 秒未歸 0 = 流程卡住）

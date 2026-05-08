@@ -316,8 +316,7 @@ class MeasurementManager:
                        ear_covers: Dict[int, str] = None,
                        enabled_channels: List[int] = None,
                        batch_no: str = "",
-                       machine_name: str = "Machine1",
-                       remote_log_dir: str = "") -> bool:
+                       machine_name: str = "Machine1") -> bool:
         """保存單次量測的一列資料至 CSV (每次 D515/D500 觸發時呼叫)。
         會自動依據機台名與當天日期切換到對應的 log 檔。
 
@@ -416,37 +415,9 @@ class MeasurementManager:
                     row.append(0)
 
                 writer.writerow(row)
-            # 同步寫入遠端簡化版 (失敗不影響本機 log 結果)
-            if remote_log_dir:
-                self._save_remote_summary(remote_log_dir, machine_name,
-                                          batch_no, time_str, plc_data)
             return True
         except Exception as e:
             print(f"寫入量測記錄失敗: {e}")
-            return False
-
-    def _save_remote_summary(self, remote_dir: str, machine_name: str,
-                             batch_no: str, time_str: str, plc_data) -> bool:
-        """寫入遠端簡化版 log：批號 / 時間 / TOTAL OK / TOTAL NG。
-        遠端寫入失敗時只 print 警告，不影響本地 log 結果。
-        """
-        try:
-            os.makedirs(remote_dir, exist_ok=True)
-            date_str = datetime.now().strftime("%Y%m%d")
-            safe_machine = machine_name.strip() or "Machine"
-            filename = f"summary_log_{date_str}_{safe_machine}.csv"
-            filepath = os.path.join(remote_dir, filename)
-            write_header = not os.path.exists(filepath)
-            total_ok = sum(plc_data.ok_counts[:12]) if plc_data else 0
-            total_ng = sum(plc_data.ng_counts[:12]) if plc_data else 0
-            with open(filepath, 'a', newline='', encoding='utf-8-sig') as f:
-                writer = csv.writer(f)
-                if write_header:
-                    writer.writerow(['批號', '時間', 'TOTAL OK', 'TOTAL NG'])
-                writer.writerow([batch_no or "", time_str, total_ok, total_ng])
-            return True
-        except Exception as e:
-            print(f"[!] 寫入遠端 summary log 失敗: {e}")
             return False
 
     def get_log_filepath(self) -> str:
