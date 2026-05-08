@@ -86,8 +86,12 @@ class AppConfig:
     title: str = "擎添耳溫槍探頭套檢測系統"
     window_width: int = 1920
     window_height: int = 900
-    simulation_mode: bool = True  # 模擬模式 (無硬體時使用)
+    simulation_mode: bool = True  # [舊欄位] 模擬模式總開關；保留作為向下相容，新欄位優先
+    plc_simulation_mode: bool = True  # PLC 模擬 (獨立於藍芽)
+    bt_simulation_mode: bool = True   # 藍芽槍模擬 (獨立於 PLC)
     log_dir: str = "logs"  # 量測記錄目錄
+    remote_log_dir: str = ""    # 遠端 log 目錄 (空=不寫遠端)；寫入簡化版 cycle log
+    remote_alarm_dir: str = ""  # 遠端 alarm 目錄 (空=不寫遠端)；寫入完整 alarm
     machine_name: str = "Machine1"  # 機台名稱 (用於 log 檔名與 UI 顯示)
     batch_no: str = ""  # 目前批號 (人員輸入，限定英數字，每筆 log 列首寫入此值)
     extra_password: str = "1234"  # 進階設定額外密碼 (與內建密碼並行)
@@ -111,21 +115,35 @@ def _ensure_config_exists():
         print(f"已從 {default_file} 建立初始設定檔: {CONFIG_FILE}")
 
 
+# 模組級旗標：紀錄上一次 load_config 是否成功讀取既有檔案
+# False 時 save_config 會拒絕寫入，避免把預設值覆蓋掉壞掉但有真實設定的 config.json
+_load_was_successful = False
+
+
 def load_config() -> AppConfig:
     """載入設定檔"""
+    global _load_was_successful
     _ensure_config_exists()
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            return _dict_to_config(data)
+            cfg = _dict_to_config(data)
+            _load_was_successful = True
+            return cfg
         except Exception as e:
-            print(f"載入設定檔失敗: {e}，使用預設值")
+            print(f"[!!] 載入設定檔失敗: {e}")
+            print(f"[!!] 為避免覆蓋原始 config.json，本次將使用預設值執行，但不允許自動回寫")
+            print(f"[!!] 請手動修復或還原: {CONFIG_FILE}")
+    _load_was_successful = False
     return AppConfig()
 
 
 def save_config(config: AppConfig) -> bool:
-    """儲存設定檔"""
+    """儲存設定檔；若先前 load 失敗則拒絕寫入，避免預設值覆蓋掉原始檔案"""
+    if not _load_was_successful:
+        print(f"[!!] 因先前載入 config.json 失敗，已拒絕本次儲存以避免覆蓋原始設定")
+        return False
     try:
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
             json.dump(asdict(config), f, ensure_ascii=False, indent=2)
@@ -140,9 +158,19 @@ def _dict_to_config(data: dict) -> AppConfig:
     config = AppConfig()
 
     # 更新基本欄位
-    for key in ['version', 'title', 'window_width', 'window_height', 'simulation_mode', 'log_dir', 'machine_name', 'batch_no', 'extra_password']:
+    for key in ['version', 'title', 'window_width', 'window_height', 'simulation_mode',
+                'plc_simulation_mode', 'bt_simulation_mode',
+                'log_dir', 'remote_log_dir', 'remote_alarm_dir',
+                'machine_name', 'batch_no', 'extra_password']:
         if key in data:
             setattr(config, key, data[key])
+
+    # 向下相容：舊版 config.json 只有 simulation_mode 時，自動同步到兩個新欄位
+    if 'simulation_mode' in data:
+        if 'plc_simulation_mode' not in data:
+            config.plc_simulation_mode = data['simulation_mode']
+        if 'bt_simulation_mode' not in data:
+            config.bt_simulation_mode = data['simulation_mode']
 
     # 更新子設定
     if 'bluetooth' in data:

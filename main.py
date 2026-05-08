@@ -80,7 +80,13 @@ system_status_label = None
 measure_status_label = None 
 batch_no_input = None       # 批號輸入框
 machine_name_input = None   # 設定頁的機台名稱輸入框
-plc_monitor_ui = {}         
+total_ok_label = None       # 頂部 TOTAL OK 大字
+total_ng_label = None       # 頂部 TOTAL NG 大字
+plc_sim_switch = None       # 設定頁的 PLC 模擬模式開關
+bt_sim_switch = None        # 設定頁的藍芽模擬模式開關
+remote_log_dir_input = None    # 遠端 log 路徑輸入框
+remote_alarm_dir_input = None  # 遠端 alarm 路徑輸入框
+plc_monitor_ui = {}
 system_running = False
 slave_channel_enabled = {}  # Slave 回報的通道啟用狀態 {ch: bool}
 
@@ -124,7 +130,7 @@ def init_managers():
 
     # 藍芽管理器
     bt_manager = BluetoothManager(
-        simulation_mode=config.simulation_mode,
+        simulation_mode=config.bt_simulation_mode,
         connect_timeout=config.bluetooth.timeout,
         reconnect_interval=config.bluetooth.reconnect_interval
     )
@@ -145,7 +151,7 @@ def init_managers():
         plc_manager = PLCManager(
             ip_address=config.plc.ip_address,
             port=config.plc.port,
-            simulation_mode=config.simulation_mode
+            simulation_mode=config.plc_simulation_mode
         )
         plc_manager.set_callbacks(
             on_empty=on_plc_empty_trigger,
@@ -282,34 +288,46 @@ def log_message(msg: str):
                 log_console.push(formatted)
     except: pass
 
-def write_alarm_log(message: str, alarm_type: str = "其他"):
-    """寫入歷史異常紀錄 CSV (一天一個檔案)"""
+def _write_alarm_line(alarm_dir: str, today: str, line: str, machine_suffix: str = ""):
+    """將一筆 alarm 寫入指定資料夾；檔案被鎖定時自動 fallback 到 _1 副檔。"""
+    os.makedirs(alarm_dir, exist_ok=True)
+    base = f"alarm_{today}{machine_suffix}"
+    filepath = os.path.join(alarm_dir, f"{base}.csv")
+    write_header = not os.path.exists(filepath)
     try:
-        alarm_dir = r"D:\logs\Alarm"
-        os.makedirs(alarm_dir, exist_ok=True)
-        today = datetime.datetime.now().strftime("%Y%m%d")
-        filepath = os.path.join(alarm_dir, f"alarm_{today}.csv")
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        safe_message = message.replace('"', '""')
-        line = f'{timestamp},{alarm_type},"{safe_message}"\n'
-        # 檔案不存在時寫入 CSV 標頭
-        write_header = not os.path.exists(filepath)
-        try:
-            with open(filepath, "a", encoding="utf-8-sig") as f:
-                if write_header:
-                    f.write("日期時間,異常類型,詳細內容\n")
-                f.write(line)
-        except PermissionError:
-            # 檔案被鎖定（如 Excel 開啟中），寫入備用檔案
-            fallback = os.path.join(alarm_dir, f"alarm_{today}_1.csv")
-            write_header_fb = not os.path.exists(fallback)
-            with open(fallback, "a", encoding="utf-8-sig") as f:
-                if write_header_fb:
-                    f.write("日期時間,異常類型,詳細內容\n")
-                f.write(line)
-            print(f"[!] Alarm CSV 被鎖定，已寫入備用: {os.path.basename(fallback)}")
+        with open(filepath, "a", encoding="utf-8-sig") as f:
+            if write_header:
+                f.write("日期時間,異常類型,詳細內容\n")
+            f.write(line)
+    except PermissionError:
+        fallback = os.path.join(alarm_dir, f"{base}_1.csv")
+        write_header_fb = not os.path.exists(fallback)
+        with open(fallback, "a", encoding="utf-8-sig") as f:
+            if write_header_fb:
+                f.write("日期時間,異常類型,詳細內容\n")
+            f.write(line)
+        print(f"[!] Alarm CSV 被鎖定，已寫入備用: {os.path.basename(fallback)}")
+
+def write_alarm_log(message: str, alarm_type: str = "其他"):
+    """寫入歷史異常紀錄 CSV (一天一個檔案)，本機 + 遠端 (若有設定)"""
+    today = datetime.datetime.now().strftime("%Y%m%d")
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    safe_message = message.replace('"', '""')
+    line = f'{timestamp},{alarm_type},"{safe_message}"\n'
+
+    # 本機寫入 (固定路徑)
+    try:
+        _write_alarm_line(r"D:\logs\Alarm", today, line)
     except Exception as e:
-        print(f"[!] 寫入 Alarm Log 失敗: {e}")
+        print(f"[!] 寫入本機 Alarm Log 失敗: {e}")
+
+    # 遠端寫入：使用者指定的 alarm 資料夾 (完整路徑)，檔名加機台名以避免多台機共用資料夾時衝突
+    if config.remote_alarm_dir:
+        try:
+            safe_machine = (config.machine_name or "Machine").strip() or "Machine"
+            _write_alarm_line(config.remote_alarm_dir, today, line, machine_suffix=f"_{safe_machine}")
+        except Exception as e:
+            print(f"[!] 寫入遠端 Alarm Log 失敗: {e}")
 
 def show_alert(message: str, alarm_type: str = "其他"):
     """顯示通用警報"""
@@ -489,7 +507,7 @@ def on_plc_empty_trigger():
     clear_meter_values(is_empty=True)
     try:
         measure_manager.start_empty_measurement()
-        if config.simulation_mode: bt_manager.set_simulation_mode_empty()
+        if config.bt_simulation_mode: bt_manager.set_simulation_mode_empty()
         delay = config.timing.empty_collect_delay
         log_message(f"[流程] 空槍: {delay}s 後開始收集")
         threading.Timer(delay, trigger_empty_ack_and_collect).start()
@@ -562,7 +580,7 @@ def on_plc_measure_trigger():
     clear_meter_values(is_empty=False)
     try:
         measure_manager.start_temperature_measurement()
-        if config.simulation_mode: bt_manager.set_simulation_mode_measure()
+        if config.bt_simulation_mode: bt_manager.set_simulation_mode_measure()
         delay = config.timing.measure_collect_delay
         log_message(f"[流程] 量測: {delay}s 後開始收集")
         threading.Timer(delay, trigger_measure_ack_and_collect).start()
@@ -738,7 +756,7 @@ def on_network_command(command: str):
         # 設定量測狀態 (讓 Slave UI 顯示在正確欄位)
         if measure_manager:
             measure_manager.start_empty_measurement()
-        if config.simulation_mode and bt_manager:
+        if config.bt_simulation_mode and bt_manager:
             bt_manager.set_simulation_mode_empty()
         if bt_manager:
             for ch in bt_manager.devices.keys():
@@ -761,7 +779,7 @@ def on_network_command(command: str):
         clear_meter_values(is_empty=False)
         if measure_manager:
             measure_manager.start_temperature_measurement()
-        if config.simulation_mode and bt_manager:
+        if config.bt_simulation_mode and bt_manager:
             bt_manager.set_simulation_mode_measure()
         if bt_manager:
             for ch in bt_manager.devices.keys():
@@ -805,6 +823,7 @@ def on_measurement_complete(result):
             enabled_channels=get_enabled_channel_list(),
             batch_no=config.batch_no,
             machine_name=config.machine_name,
+            remote_log_dir=config.remote_log_dir,
         )
         log_message(f"[流程] 量測 Log 寫入: {'成功' if log_saved else '失敗'}")
 
@@ -921,6 +940,10 @@ def on_reset_count_click():
                 meter['ok_display'].set_value(0)
             if meter.get('ng_display'):
                 meter['ng_display'].set_value(0)
+        if total_ok_label is not None:
+            total_ok_label.set_text('0')
+        if total_ng_label is not None:
+            total_ng_label.set_text('0')
         ui.notify("OK/NG 計數已歸零", type='positive')
         log_message("使用者執行計數歸零")
         dialog.close()
@@ -1051,6 +1074,7 @@ def collect_empty_values():
             enabled_channels=get_enabled_channel_list(),
             batch_no=config.batch_no,
             machine_name=config.machine_name,
+            remote_log_dir=config.remote_log_dir,
         )
 
     update_plc_display()
@@ -1189,6 +1213,12 @@ def _refresh_ui_from_config():
     # 通道啟用開關
     for ch, sw in channel_switches.items():
         sw.set_value(config.measurement.channel_enabled[ch - 1])
+    # 模擬模式
+    if plc_sim_switch is not None: plc_sim_switch.set_value(config.plc_simulation_mode)
+    if bt_sim_switch is not None: bt_sim_switch.set_value(config.bt_simulation_mode)
+    # 遠端記錄路徑
+    if remote_log_dir_input is not None: remote_log_dir_input.set_value(config.remote_log_dir)
+    if remote_alarm_dir_input is not None: remote_alarm_dir_input.set_value(config.remote_alarm_dir)
 
 def _apply_channel_enabled_to_ui():
     """對端通道狀態變更後，同步更新本機 UI (開關 + 通道列外觀)"""
@@ -1290,25 +1320,53 @@ def on_reset_click():
         meter['ear_cover'].set_text('--'); meter['ear_cover'].classes('text-gray-500', remove='text-green-400 text-red-400')
         if meter['ok_display']: meter['ok_display'].set_value(0)
         if meter['ng_display']: meter['ng_display'].set_value(0)
+    if total_ok_label is not None: total_ok_label.set_text('0')
+    if total_ng_label is not None: total_ng_label.set_text('0')
     if plc_manager: plc_manager.write_ok_ng_counts([0]*12, [0]*12)
     stop_alert_flash()
-    if config.simulation_mode: bt_manager.reset_simulation()
+    if config.bt_simulation_mode: bt_manager.reset_simulation()
     log_message("資料重設")
 
 def toggle_settings():
     if settings_drawer: settings_drawer.toggle()
 
+def _pick_directory(input_field, title: str = '選擇資料夾'):
+    """彈出系統選資料夾對話框 (tkinter)，把選到的路徑寫回 input_field。
+    僅 kiosk 場景使用 (NiceGUI 與瀏覽器同機)。"""
+    def _do():
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes('-topmost', True)
+            initial = (input_field.value or "").strip()
+            if not initial or not os.path.isdir(initial):
+                initial = os.path.expanduser('~')
+            path = filedialog.askdirectory(initialdir=initial, title=title)
+            root.destroy()
+            if path:
+                input_field.set_value(os.path.normpath(path))
+        except Exception as e:
+            print(f"[!] 選擇資料夾失敗: {e}")
+    threading.Thread(target=_do, daemon=True).start()
+
 def _collect_settings_from_ui():
     """從 UI 收集所有設定值寫入 config"""
     # 機台名稱 (僅允許英數字、底線、連字號，作為檔名一部分)
+    # 注意: 空字串/格式錯誤皆「保留原值」，不會被改回預設 "Machine1"
     if machine_name_input:
         import re
         raw = (machine_name_input.value or "").strip()
-        if raw and not re.fullmatch(r'[A-Za-z0-9_\-]+', raw):
+        if not raw:
+            # 空字串：保留原值，並把 UI 還原回原值
+            machine_name_input.set_value(config.machine_name)
+            ui.notify("機台名稱不可為空，已還原原值", type='warning')
+        elif not re.fullmatch(r'[A-Za-z0-9_\-]+', raw):
             ui.notify("機台名稱僅能為英數字、底線或連字號", type='negative')
             machine_name_input.set_value(config.machine_name)
         else:
-            config.machine_name = raw or "Machine1"
+            config.machine_name = raw
     if tolerance_upper_input: config.measurement.tolerance_upper = tolerance_upper_input.value
     if tolerance_lower_input: config.measurement.tolerance_lower = tolerance_lower_input.value
     if empty_upper_input: config.measurement.empty_upper = empty_upper_input.value
@@ -1340,22 +1398,33 @@ def _collect_settings_from_ui():
         if idx < len(config.bluetooth.device_addresses): config.bluetooth.device_addresses[idx] = mac_input.value
     for i in range(1, 13):
         if i in channel_switches: config.measurement.channel_enabled[i-1] = channel_switches[i].value
+    # 模擬模式 (PLC / 藍芽各自獨立)
+    if plc_sim_switch is not None: config.plc_simulation_mode = bool(plc_sim_switch.value)
+    if bt_sim_switch is not None: config.bt_simulation_mode = bool(bt_sim_switch.value)
+    # 遠端記錄路徑 (log / alarm 各自獨立)
+    if remote_log_dir_input is not None: config.remote_log_dir = (remote_log_dir_input.value or "").strip()
+    if remote_alarm_dir_input is not None: config.remote_alarm_dir = (remote_alarm_dir_input.value or "").strip()
 
 def on_save_advanced_settings():
     _collect_settings_from_ui()
     measure_manager.set_tolerance(config.measurement.tolerance_upper, config.measurement.tolerance_lower)
     update_channel_disabled_display()
-    save_config(config)
+    saved = save_config(config)
     _sync_channel_enabled_to_peer()
     _refresh_ui_from_config()
-    ui.notify('進階設定已儲存', type='positive')
+    if saved:
+        ui.notify('進階設定已儲存', type='positive')
+    else:
+        ui.notify('儲存失敗：原始 config.json 可能損毀，已拒絕覆寫，請檢查 console 訊息', type='negative')
 
 def on_apply_settings():
     """儲存設定並即時套用到所有執行中的管理器（不需重啟程式）"""
     global bt_manager, plc_manager, net_manager, system_running
 
     _collect_settings_from_ui()
-    save_config(config)
+    saved = save_config(config)
+    if not saved:
+        ui.notify('儲存失敗：原始 config.json 可能損毀，已拒絕覆寫；本次只套用到記憶體', type='warning')
 
     log_message("[設定] 開始套用新參數...")
 
@@ -1399,6 +1468,19 @@ def on_apply_settings():
         net_manager.master_ip = config.network.master_ip
         net_manager.port = config.network.port
         log_message(f"[設定] 網路參數已更新 (模式: {config.network.mode})")
+
+    # 5a. 模擬模式：即時更新 manager 屬性 (下次連線生效；建議重啟程式以完全切換)
+    sim_changed = False
+    if bt_manager and bt_manager.simulation_mode != config.bt_simulation_mode:
+        bt_manager.simulation_mode = config.bt_simulation_mode
+        log_message(f"[設定] 藍芽模擬模式: {config.bt_simulation_mode} (建議重啟程式以完全生效)")
+        sim_changed = True
+    if plc_manager and plc_manager.simulation_mode != config.plc_simulation_mode:
+        plc_manager.simulation_mode = config.plc_simulation_mode
+        log_message(f"[設定] PLC 模擬模式: {config.plc_simulation_mode} (建議重啟程式以完全生效)")
+        sim_changed = True
+    if sim_changed:
+        ui.notify('模擬模式已切換，建議重啟程式以完全生效', type='warning')
 
     # 6. 時序設定直接生效（量測流程讀取 config.timing.*）
     log_message(f"[設定] 時序參數已更新")
@@ -1525,9 +1607,14 @@ def update_plc_display():
                 if meters_ui[internal_ch]['ng_display']:
                     meters_ui[internal_ch]['ng_display'].set_value(data.ng_counts[logical_idx])
             except: pass
+    # 更新頂部 TOTAL OK / TOTAL NG (12 通道加總)
+    if total_ok_label is not None:
+        total_ok_label.set_text(str(sum(data.ok_counts[:12])))
+    if total_ng_label is not None:
+        total_ng_label.set_text(str(sum(data.ng_counts[:12])))
 
 def build_settings_drawer():
-    global settings_drawer, timing_inputs, plc_inputs, bt_inputs, bt_mac_inputs, net_inputs, mode_select, tolerance_upper_input, tolerance_lower_input, empty_upper_input, empty_lower_input, settings_logged_in, protected_sections, temp_anomaly_switch, temp_anomaly_upper_input, temp_anomaly_lower_input, temp_anomaly_fields, no_cover_anomaly_switch, no_cover_anomaly_count_input, no_cover_anomaly_fields, machine_name_input
+    global settings_drawer, timing_inputs, plc_inputs, bt_inputs, bt_mac_inputs, net_inputs, mode_select, tolerance_upper_input, tolerance_lower_input, empty_upper_input, empty_lower_input, settings_logged_in, protected_sections, temp_anomaly_switch, temp_anomaly_upper_input, temp_anomaly_lower_input, temp_anomaly_fields, no_cover_anomaly_switch, no_cover_anomaly_count_input, no_cover_anomaly_fields, machine_name_input, plc_sim_switch, bt_sim_switch, remote_log_dir_input, remote_alarm_dir_input
     is_master = config.network.mode == "master"
     protected_sections = []
 
@@ -1685,6 +1772,35 @@ def build_settings_drawer():
                                 with ui.row().classes('items-center'):
                                     ui.label('Port:').classes('text-gray-300 w-28')
                                     plc_inputs['port'] = ui.number(value=config.plc.port).props('outlined dense').classes('w-24')
+                    # --- 模擬模式 (PLC / 藍芽各自獨立) ---
+                    with ui.expansion('模擬模式', icon='science').classes('w-full bg-slate-800'):
+                        with ui.column().classes('w-full gap-2 p-2'):
+                            ui.label('開啟後不需實體裝置即可測試流程。修改後需按下方「更新資料 (即時套用)」才會重建管理器。').classes('text-gray-400 text-xs')
+                            if is_master:
+                                with ui.row().classes('items-center'):
+                                    ui.label('PLC 模擬:').classes('text-gray-300 w-28')
+                                    plc_sim_switch = ui.switch(value=config.plc_simulation_mode).props('dense')
+                            with ui.row().classes('items-center'):
+                                ui.label('藍芽模擬:').classes('text-gray-300 w-28')
+                                bt_sim_switch = ui.switch(value=config.bt_simulation_mode).props('dense')
+                    # --- 遠端記錄 (log / alarm 路徑各自獨立) ---
+                    with ui.expansion('遠端記錄', icon='cloud_upload').classes('w-full bg-slate-800'):
+                        with ui.column().classes('w-full gap-2 p-2'):
+                            ui.label('指定遠端資料夾 (網路磁碟或 UNC 路徑)；留空表示不寫遠端。').classes('text-gray-400 text-xs')
+                            with ui.row().classes('items-center w-full gap-2'):
+                                ui.label('Log 路徑:').classes('text-gray-300 w-28')
+                                remote_log_dir_input = ui.input(value=config.remote_log_dir, placeholder=r'例如 \\NAS\hmi\log') \
+                                    .props('outlined dense').classes('flex-grow')
+                                ui.button(icon='folder_open',
+                                          on_click=lambda: _pick_directory(remote_log_dir_input, '選擇遠端 Log 資料夾')) \
+                                    .props('flat color=blue dense').tooltip('瀏覽資料夾')
+                            with ui.row().classes('items-center w-full gap-2'):
+                                ui.label('Alarm 路徑:').classes('text-gray-300 w-28')
+                                remote_alarm_dir_input = ui.input(value=config.remote_alarm_dir, placeholder=r'例如 \\NAS\hmi\alarm') \
+                                    .props('outlined dense').classes('flex-grow')
+                                ui.button(icon='folder_open',
+                                          on_click=lambda: _pick_directory(remote_alarm_dir_input, '選擇遠端 Alarm 資料夾')) \
+                                    .props('flat color=blue dense').tooltip('瀏覽資料夾')
 
                 # === 不需要密碼的區塊 ===
                 with ui.expansion('藍芽設定', icon='bluetooth').classes('w-full bg-slate-800'):
@@ -1748,7 +1864,7 @@ def build_meter_block(title: str, start_ch: int, end_ch: int, border_color: str 
             meters_ui[i] = {'row_container': row_container, 'disabled_badge': disabled_badge, 'bt_icon': bt_icon, 'ear_cover': ear_cover_label, 'empty_display': empty_display, 'temp_display': temp_display, 'error_display': error_display, 'light': status_light, 'text': status_text, 'ok_display': ok_display, 'ng_display': ng_display, 'no_cover_count': no_cover_count_label}
 
 def build_ui():
-    global meters_ui, log_console, plc_status_icon, network_status_icon, alert_container, alert_message_label, system_status_label, measure_status_label, plc_monitor_ui, batch_no_input
+    global meters_ui, log_console, plc_status_icon, network_status_icon, alert_container, alert_message_label, system_status_label, measure_status_label, plc_monitor_ui, batch_no_input, total_ok_label, total_ng_label
     is_master = config.network.mode == "master"
     ui.colors(primary='#5898d4', secondary='#26a69a', accent='#9c27b0', dark='#1d1d1d')
     ui.add_head_html('<style>body { user-select: text !important; -webkit-user-select: text !important; }</style>')
@@ -1767,6 +1883,14 @@ def build_ui():
                                  color='blue' if is_master else 'orange').classes('text-lg px-3 py-1')
                         # 機台名稱 (3 台機共用程式，靠 config 區分)
                         ui.badge(config.machine_name, color='teal').classes('text-lg px-3 py-1')
+                        # TOTAL OK / TOTAL NG 大字 (僅 Master 顯示，由 PLC OK/NG 計數加總)
+                        if is_master:
+                            with ui.row().classes('items-center gap-2 bg-slate-800 px-4 py-1 rounded-full border border-green-700 ml-2'):
+                                ui.label('TOTAL OK:').classes('text-gray-300 text-lg')
+                                total_ok_label = ui.label('0').classes('text-green-400 text-2xl font-bold font-mono')
+                            with ui.row().classes('items-center gap-2 bg-slate-800 px-4 py-1 rounded-full border border-red-700'):
+                                ui.label('TOTAL NG:').classes('text-gray-300 text-lg')
+                                total_ng_label = ui.label('0').classes('text-red-400 text-2xl font-bold font-mono')
                     with ui.row().classes('items-center gap-4'):
                         if is_master:
                             with ui.row().classes('items-center gap-2'):
@@ -1787,9 +1911,9 @@ def build_ui():
                             with ui.row().classes('items-center gap-1 bg-slate-800 px-3 py-1 rounded-full border border-gray-700'):
                                 ui.label('批號:').classes('text-gray-400 text-lg')
                                 batch_no_input = ui.input(value=config.batch_no, placeholder='英數字') \
-                                    .props('outlined dense dark') \
+                                    .props('outlined dense dark maxlength=20') \
                                     .props('input-class="text-blue-300 font-mono text-lg"') \
-                                    .classes('w-32')
+                                    .classes('w-56')
                                 # 失焦時若未按 SAVE 則還原；延遲 150ms 等 SAVE 的 click 先觸發
                                 batch_no_input.on('blur', lambda e: _schedule_batch_revert())
                                 ui.button(icon='save', on_click=on_batch_no_commit) \
