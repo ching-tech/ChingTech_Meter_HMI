@@ -64,8 +64,8 @@ class TimingConfig:
 @dataclass
 class MeasurementConfig:
     """量測設定"""
-    tolerance_upper: float = 0.5   # 誤差上限 (°C)
-    tolerance_lower: float = -0.5  # 誤差下限 (°C)
+    tolerance_upper: float = 0.5   # 誤差上限 (°C)，正值 magnitude
+    tolerance_lower: float = 0.5   # 誤差下限 (°C)，正值 magnitude；UI 顯示時自動 prefix "-"
     empty_upper: float = 40.0      # 空槍值上限 (°C)
     empty_lower: float = 20.0      # 空槍值下限 (°C)
     meter_count: int = 12          # 總通道數
@@ -188,6 +188,13 @@ def _dict_to_config(data: dict) -> AppConfig:
         # 過濾未知 key，相容舊版 config.json
         meas_fields = {f.name for f in MeasurementConfig.__dataclass_fields__.values()}
         meas_data = {k: v for k, v in meas_data.items() if k in meas_fields}
+        # 誤差上下限：統一儲存為正值 magnitude；舊 config.json 寫成負值會自動轉正
+        for k in ('tolerance_upper', 'tolerance_lower'):
+            if k in meas_data:
+                try:
+                    meas_data[k] = abs(float(meas_data[k]))
+                except Exception:
+                    pass
         # 確保 channel_enabled 有 12 個元素
         if 'channel_enabled' in meas_data:
             enabled = meas_data['channel_enabled']

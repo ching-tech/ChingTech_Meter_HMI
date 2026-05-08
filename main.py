@@ -83,6 +83,7 @@ batch_no_input = None       # 批號輸入框
 machine_name_input = None   # 設定頁的機台名稱輸入框
 total_ok_label = None       # 頂部 TOTAL OK 大字
 total_ng_label = None       # 頂部 TOTAL NG 大字
+current_settings_labels = {}  # 「目前設定」面板的 label refs (供設定變更後即時刷新)
 plc_sim_switch = None       # 設定頁的 PLC 模擬模式開關
 bt_sim_switch = None        # 設定頁的藍芽模擬模式開關
 remote_log_dir_input = None    # 遠端 log 路徑輸入框
@@ -1332,11 +1333,20 @@ def _refresh_ui_from_config():
     """從 config 刷新所有設定面板 UI 元件的顯示值"""
     # 機台名稱
     if machine_name_input: machine_name_input.set_value(config.machine_name)
-    # 量測參數
-    if tolerance_upper_input: tolerance_upper_input.set_value(config.measurement.tolerance_upper)
-    if tolerance_lower_input: tolerance_lower_input.set_value(config.measurement.tolerance_lower)
+    # 量測參數 (設定面板輸入框)
+    if tolerance_upper_input: tolerance_upper_input.set_value(abs(config.measurement.tolerance_upper))
+    if tolerance_lower_input: tolerance_lower_input.set_value(abs(config.measurement.tolerance_lower))
     if empty_upper_input: empty_upper_input.set_value(config.measurement.empty_upper)
     if empty_lower_input: empty_lower_input.set_value(config.measurement.empty_lower)
+    # 「目前設定」面板的顯示 label (主畫面右側)
+    if current_settings_labels.get('tol_upper'):
+        current_settings_labels['tol_upper'].set_text(f'+{abs(config.measurement.tolerance_upper):.2f}°C')
+    if current_settings_labels.get('tol_lower'):
+        current_settings_labels['tol_lower'].set_text(f'-{abs(config.measurement.tolerance_lower):.2f}°C')
+    if current_settings_labels.get('empty_upper'):
+        current_settings_labels['empty_upper'].set_text(f'{config.measurement.empty_upper:.1f}°C')
+    if current_settings_labels.get('empty_lower'):
+        current_settings_labels['empty_lower'].set_text(f'{config.measurement.empty_lower:.1f}°C')
     # 溫度異常
     if temp_anomaly_switch: temp_anomaly_switch.set_value(config.measurement.temp_anomaly_enabled)
     if temp_anomaly_upper_input: temp_anomaly_upper_input.set_value(config.measurement.temp_anomaly_upper)
@@ -1518,8 +1528,9 @@ def _collect_settings_from_ui():
             machine_name_input.set_value(config.machine_name)
         else:
             config.machine_name = raw
-    if tolerance_upper_input: config.measurement.tolerance_upper = tolerance_upper_input.value
-    if tolerance_lower_input: config.measurement.tolerance_lower = tolerance_lower_input.value
+    # 誤差上下限統一存正值 magnitude；abs() 防止使用者繞過 min=0 限制
+    if tolerance_upper_input: config.measurement.tolerance_upper = abs(float(tolerance_upper_input.value or 0))
+    if tolerance_lower_input: config.measurement.tolerance_lower = abs(float(tolerance_lower_input.value or 0))
     if empty_upper_input: config.measurement.empty_upper = empty_upper_input.value
     if empty_lower_input: config.measurement.empty_lower = empty_lower_input.value
     # 溫度異常設定
@@ -1581,7 +1592,7 @@ def on_apply_settings():
 
     # 1. 量測管理器：更新誤差容許值
     measure_manager.set_tolerance(config.measurement.tolerance_upper, config.measurement.tolerance_lower)
-    log_message(f"[設定] 誤差範圍: +{config.measurement.tolerance_upper:.2f} / -{config.measurement.tolerance_lower:.2f}")
+    log_message(f"[設定] 誤差範圍: +{abs(config.measurement.tolerance_upper):.2f} / -{abs(config.measurement.tolerance_lower):.2f}")
 
     # 2. 通道啟用狀態
     update_channel_disabled_display()
@@ -1859,11 +1870,11 @@ def build_settings_drawer():
                                     .props('outlined dense').classes('w-36')
                             if is_master:
                                 with ui.row().classes('items-center'):
-                                    ui.label('誤差上限:').classes('text-gray-300 w-28')
-                                    tolerance_upper_input = ui.number(value=config.measurement.tolerance_upper, format='%.2f', step=0.01).props('outlined dense suffix=°C').classes('w-24')
+                                    ui.label('+ 上限:').classes('text-gray-300 w-28')
+                                    tolerance_upper_input = ui.number(value=abs(config.measurement.tolerance_upper), format='%.2f', step=0.01, min=0).props('outlined dense suffix=°C').classes('w-24')
                                 with ui.row().classes('items-center'):
-                                    ui.label('誤差下限:').classes('text-gray-300 w-28')
-                                    tolerance_lower_input = ui.number(value=config.measurement.tolerance_lower, format='%.2f', step=0.01).props('outlined dense suffix=°C').classes('w-24')
+                                    ui.label('- 下限:').classes('text-gray-300 w-28')
+                                    tolerance_lower_input = ui.number(value=abs(config.measurement.tolerance_lower), format='%.2f', step=0.01, min=0).props('outlined dense suffix=°C').classes('w-24')
                                 with ui.row().classes('items-center'):
                                     ui.label('空槍上限:').classes('text-gray-300 w-28')
                                     empty_upper_input = ui.number(value=config.measurement.empty_upper, format='%.2f', step=0.1).props('outlined dense suffix=°C').classes('w-24')
@@ -2113,12 +2124,16 @@ def build_ui():
                 with ui.card().classes('w-full bg-slate-800 p-3'):
                     ui.label('目前設定').classes('text-lg text-white font-bold mb-2')
                     with ui.row().classes('items-center gap-4'):
-                        ui.label('上限:').classes('text-gray-400 text-base'); ui.label(f'+{config.measurement.tolerance_upper:.2f}°C').classes('text-green-400 text-xl font-bold')
-                        ui.label('下限:').classes('text-gray-400 text-base'); ui.label(f'-{config.measurement.tolerance_lower:.2f}°C').classes('text-red-400 text-xl font-bold')
+                        ui.label('上限:').classes('text-gray-400 text-base')
+                        current_settings_labels['tol_upper'] = ui.label(f'+{abs(config.measurement.tolerance_upper):.2f}°C').classes('text-green-400 text-xl font-bold')
+                        ui.label('下限:').classes('text-gray-400 text-base')
+                        current_settings_labels['tol_lower'] = ui.label(f'-{abs(config.measurement.tolerance_lower):.2f}°C').classes('text-red-400 text-xl font-bold')
                     if is_master:
                         with ui.row().classes('items-center gap-4 mt-1'):
-                            ui.label('空槍上限:').classes('text-gray-400 text-base'); ui.label(f'{config.measurement.empty_upper:.1f}°C').classes('text-orange-400 text-xl font-bold')
-                            ui.label('空槍下限:').classes('text-gray-400 text-base'); ui.label(f'{config.measurement.empty_lower:.1f}°C').classes('text-cyan-400 text-xl font-bold')
+                            ui.label('空槍上限:').classes('text-gray-400 text-base')
+                            current_settings_labels['empty_upper'] = ui.label(f'{config.measurement.empty_upper:.1f}°C').classes('text-orange-400 text-xl font-bold')
+                            ui.label('空槍下限:').classes('text-gray-400 text-base')
+                            current_settings_labels['empty_lower'] = ui.label(f'{config.measurement.empty_lower:.1f}°C').classes('text-cyan-400 text-xl font-bold')
                 with ui.card().classes('w-full bg-slate-800 p-3'):
                     with ui.row().classes('w-full items-center justify-between mb-2'):
                         ui.label('量測流程').classes('text-lg text-white font-bold')
