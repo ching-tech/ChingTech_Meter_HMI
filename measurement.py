@@ -144,20 +144,52 @@ class MeasurementManager:
         try:
             with open(filepath, 'w', newline='', encoding='utf-8-sig') as f:
                 writer = csv.writer(f)
-                # 第一列標籤 (批號欄位佔位 + A~M + 其餘空白)
-                writer.writerow(['', '', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'J', 'K', 'L', 'M'] + [''] * 41)
-                # 第二列標題 (批號 + 種類 + scan1~12 + 其他)
-                header = ['批號', '種類'] + [f'scan{i}' for i in range(1, 13)] + ['Time', '誤差上限', '誤差下限']
-                header += [f'scan{i} cover' for i in range(1, 13)]
-                header += [f'scan{i} OK' for i in range(1, 13)]
-                header += [f'scan{i} NG' for i in range(1, 13)]
-                header += ['TOTAL OK', 'TOTAL NG']
-                writer.writerow(header)
+                self._write_log_headers(writer)
             self.current_log_file = filepath
             return filepath
         except Exception as e:
             print(f"建立今日記錄檔失敗: {e}")
             return None
+
+    @staticmethod
+    def _write_log_headers(writer):
+        """寫入 log CSV 的兩列 header (主檔與 fallback 檔共用)"""
+        # 第一列標籤 (批號欄位佔位 + A~M + 其餘空白)
+        writer.writerow(['', '', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'J', 'K', 'L', 'M'] + [''] * 41)
+        # 第二列標題
+        header = ['批號', '種類'] + [f'scan{i}' for i in range(1, 13)] + ['Time', '誤差上限', '誤差下限']
+        header += [f'scan{i} cover' for i in range(1, 13)]
+        header += [f'scan{i} OK' for i in range(1, 13)]
+        header += [f'scan{i} NG' for i in range(1, 13)]
+        header += ['TOTAL OK', 'TOTAL NG']
+        writer.writerow(header)
+
+    def _write_cycle_row(self, filepath: str, row: list) -> bool:
+        """寫一列 cycle 資料；主檔被鎖定 (PermissionError，常見原因為 Excel 開啟)
+        會 fallback 到同目錄 `<filename>_1.csv`，避免該筆資料丟失。"""
+        try:
+            with open(filepath, 'a', newline='', encoding='utf-8-sig') as f:
+                writer = csv.writer(f)
+                writer.writerow(row)
+            return True
+        except PermissionError:
+            base, ext = os.path.splitext(filepath)
+            fallback = f"{base}_1{ext}"
+            try:
+                write_header = not os.path.exists(fallback)
+                with open(fallback, 'a', newline='', encoding='utf-8-sig') as f:
+                    writer = csv.writer(f)
+                    if write_header:
+                        self._write_log_headers(writer)
+                    writer.writerow(row)
+                print(f"[!] 主 log 被鎖定 (可能 Excel 開啟)，已寫入備用檔: {os.path.basename(fallback)}")
+                return True
+            except Exception as e:
+                print(f"[!!] 主檔與備用檔均寫入失敗，本筆 cycle 遺失: {e}")
+                return False
+        except Exception as e:
+            print(f"寫入量測記錄失敗: {e}")
+            return False
 
     def start_empty_measurement(self):
         """開始空槍量測"""
@@ -171,7 +203,7 @@ class MeasurementManager:
             self._notify_channel_update(channel)
 
         # 檢查是否所有通道都已記錄
-        if self._all_empty_recorded():
+        if self._any_empty_recorded():
             self._update_state(MeasurementState.EMPTY_DONE)
 
     def record_empty_values(self, values: Dict[int, float]):
@@ -183,7 +215,7 @@ class MeasurementManager:
                 self._channels[channel].timestamp = time.time()
                 self._notify_channel_update(channel)
 
-        if self._all_empty_recorded():
+        if self._any_empty_recorded():
             print(f"[measurement] 空槍記錄完成，狀態 {self._state.value} → EMPTY_DONE")
             self._update_state(MeasurementState.EMPTY_DONE)
 
@@ -279,8 +311,12 @@ class MeasurementManager:
             return JudgeResult.PASS
         return JudgeResult.FAIL
 
-    def _all_empty_recorded(self) -> bool:
-        """檢查是否有空槍值已記錄（至少一個通道）"""
+    def _any_empty_recorded(self) -> bool:
+        """檢查是否有「任一」通道已記錄空槍值。
+        注意：函式內用 any()，原本誤命名為 _all_empty_recorded 已修正。
+        實際流程中，main.py 端會 retry 收齊所有啟用通道後才呼叫 save_cycle_log，
+        故此處用 any() 已足夠判斷「至少有資料可寫」。
+        """
         return any(
             ch.empty_value is not None
             for ch in self._channels.values()
@@ -362,63 +398,49 @@ class MeasurementManager:
                 return val if val is not None else 0
             return 0
 
-        try:
-            with open(self.current_log_file, 'a', newline='', encoding='utf-8-sig') as f:
-                writer = csv.writer(f)
-                row = []
+        # 先建立完整 row，再交給 _write_cycle_row 處理 (主檔失敗會 fallback)
+        row = []
+        # 列首: 批號
+        row.append(batch_no or "")
+        # A欄: 空槍寫 "empty"，量測寫 PLC D516 值
+        if is_empty:
+            row.append("empty")
+        else:
+            row.append(plc_data.cycle_count if plc_data else "")
+        # B~M欄: 12 支槍的數值 (scan1~scan12)
+        for i in range(1, 13):
+            val = get_temperature(i)
+            row.append(f"{val:.2f}" if isinstance(val, (int, float)) else "0")
+        # N欄: 時間
+        row.append(time_str)
+        # O欄: 誤差上限, P欄: 誤差下限
+        row.append(f"+{abs(self.tolerance_upper):.2f}")
+        row.append(f"-{abs(self.tolerance_lower):.2f}")
+        # Q~AB欄: 12 支槍耳溫套 (有="1111", 無="0000")
+        for i in range(1, 13):
+            int_ch = scan_to_internal.get(i)
+            cover = ear_covers.get(int_ch, "") if ear_covers and int_ch else ""
+            if cover == "1111":
+                row.append("1111")
+            elif cover == "0000":
+                row.append("0000")
+            else:
+                row.append("")
+        # AC~AN欄: OK counts (D517~D528), AO~AZ欄: NG counts (D529~D540)
+        if plc_data:
+            row.extend(plc_data.ok_counts[:12])
+            row.extend(plc_data.ng_counts[:12])
+        else:
+            row.extend([0] * 24)
+        # BA欄: TOTAL OK (AC~AN 加總), BB欄: TOTAL NG (AO~AZ 加總)
+        if plc_data:
+            row.append(sum(plc_data.ok_counts[:12]))
+            row.append(sum(plc_data.ng_counts[:12]))
+        else:
+            row.append(0)
+            row.append(0)
 
-                # 列首: 批號
-                row.append(batch_no or "")
-
-                # A欄: 空槍寫 "empty"，量測寫 PLC D516 值
-                if is_empty:
-                    row.append("empty")
-                else:
-                    row.append(plc_data.cycle_count if plc_data else "")
-
-                # B~M欄: 12 支槍的數值 (scan1~scan12)
-                for i in range(1, 13):
-                    val = get_temperature(i)
-                    row.append(f"{val:.2f}" if isinstance(val, (int, float)) else "0")
-
-                # N欄: 時間
-                row.append(time_str)
-
-                # O欄: 誤差上限, P欄: 誤差下限
-                row.append(f"+{abs(self.tolerance_upper):.2f}")
-                row.append(f"-{abs(self.tolerance_lower):.2f}")
-
-                # Q~AB欄: 12 支槍耳溫套 (有="1111", 無="0000")
-                for i in range(1, 13):
-                    int_ch = scan_to_internal.get(i)
-                    cover = ear_covers.get(int_ch, "") if ear_covers and int_ch else ""
-                    if cover == "1111":
-                        row.append("1111")
-                    elif cover == "0000":
-                        row.append("0000")
-                    else:
-                        row.append("")
-
-                # AC~AN欄: OK counts (D517~D528), AO~AZ欄: NG counts (D529~D540)
-                if plc_data:
-                    row.extend(plc_data.ok_counts[:12])
-                    row.extend(plc_data.ng_counts[:12])
-                else:
-                    row.extend([0] * 24)
-
-                # BA欄: TOTAL OK (AC~AN 加總), BB欄: TOTAL NG (AO~AZ 加總)
-                if plc_data:
-                    row.append(sum(plc_data.ok_counts[:12]))
-                    row.append(sum(plc_data.ng_counts[:12]))
-                else:
-                    row.append(0)
-                    row.append(0)
-
-                writer.writerow(row)
-            return True
-        except Exception as e:
-            print(f"寫入量測記錄失敗: {e}")
-            return False
+        return self._write_cycle_row(self.current_log_file, row)
 
     def get_log_filepath(self) -> str:
         return self.current_log_file if self.current_log_file else ""

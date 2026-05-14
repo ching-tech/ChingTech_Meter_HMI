@@ -60,6 +60,9 @@ class PLCManager:
         self.simulation_mode = simulation_mode
 
         self._plc = None
+        # pymcprotocol 內部對單一 socket 做 send→recv 同步呼叫，多執行緒同時讀寫會讓
+        # SLMP 封包交錯導致協議錯亂；用單一 Lock 序列化所有底層讀寫
+        self._plc_lock = threading.Lock()
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._state = PLCConnectionState.DISCONNECTED
@@ -99,6 +102,17 @@ class PLCManager:
         self._on_state_callback = on_state
         self._on_reset = on_reset
 
+    # --- 序列化底層 SLMP 讀寫 (避免多執行緒同時讀寫同一 socket 造成封包交錯) ---
+    def _locked_write(self, address: str, values: list):
+        """加鎖批次寫入；呼叫端自行 try/except"""
+        with self._plc_lock:
+            self._plc.batchwrite_wordunits(address, values)
+
+    def _locked_read(self, address: str, size: int) -> list:
+        """加鎖批次讀取；呼叫端自行 try/except"""
+        with self._plc_lock:
+            return self._plc.batchread_wordunits(address, size)
+
     @property
     def state(self) -> PLCConnectionState:
         return self._state
@@ -130,7 +144,7 @@ class PLCManager:
             self._plc.connect(self.ip_address, self.port)
             # 驗證連線：測試讀取一次，確認 PLC 真的能通訊
             time.sleep(0.3)
-            self._plc.batchread_wordunits(f"D{D_BASE}", 1)
+            self._locked_read(f"D{D_BASE}", 1)
             print("[+] PLC 連線成功（已驗證讀取）")
             self._update_state(PLCConnectionState.CONNECTED)
             return True
@@ -207,7 +221,7 @@ class PLCManager:
             return True
 
         try:
-            self._plc.batchwrite_wordunits(f"D{D_BASE + _OFF_RESULT_START}", values)
+            self._locked_write(f"D{D_BASE + _OFF_RESULT_START}", values)
             return True
         except Exception as e:
             print(f"寫入判定結果失敗: {e}")
@@ -221,7 +235,7 @@ class PLCManager:
             self._sim_measure_trigger = (value == 1)
             return True
         try:
-            self._plc.batchwrite_wordunits(f"D{D_BASE + _OFF_TRIGGER}", [value])
+            self._locked_write(f"D{D_BASE + _OFF_TRIGGER}", [value])
             return True
         except Exception as e:
             print(f"寫入量測觸發失敗: {e}")
@@ -235,7 +249,7 @@ class PLCManager:
             self._sim_empty_trigger = (value == 1)
             return True
         try:
-            self._plc.batchwrite_wordunits(f"D{D_BASE + _OFF_EMPTY_TRIGGER}", [value])
+            self._locked_write(f"D{D_BASE + _OFF_EMPTY_TRIGGER}", [value])
             return True
         except Exception as e:
             print(f"寫入空槍觸發失敗: {e}")
@@ -251,7 +265,7 @@ class PLCManager:
             return True
 
         try:
-            self._plc.batchwrite_wordunits(f"D{D_BASE + _OFF_TRIGGER}", [0])
+            self._locked_write(f"D{D_BASE + _OFF_TRIGGER}", [0])
             return True
         except Exception as e:
             print(f"寫入完成訊號失敗: {e}")
@@ -267,7 +281,7 @@ class PLCManager:
             return True
 
         try:
-            self._plc.batchwrite_wordunits(f"D{D_BASE + _OFF_EMPTY_TRIGGER}", [0])
+            self._locked_write(f"D{D_BASE + _OFF_EMPTY_TRIGGER}", [0])
             return True
         except Exception as e:
             print(f"清除空槍觸發失敗: {e}")
@@ -295,7 +309,7 @@ class PLCManager:
             return True
 
         try:
-            self._plc.batchwrite_wordunits(f"D{D_BASE + _OFF_BT_ERROR}", [self._bt_error_mask])
+            self._locked_write(f"D{D_BASE + _OFF_BT_ERROR}", [self._bt_error_mask])
             return True
         except Exception as e:
             print(f"寫入藍芽狀態失敗: {e}")
@@ -310,7 +324,7 @@ class PLCManager:
             print("[模擬] 寫入 D513=0x0000 (全部清除)")
             return True
         try:
-            self._plc.batchwrite_wordunits(f"D{D_BASE + _OFF_BT_ERROR}", [0])
+            self._locked_write(f"D{D_BASE + _OFF_BT_ERROR}", [0])
             return True
         except Exception as e:
             print(f"清除 D513 失敗: {e}")
@@ -337,7 +351,7 @@ class PLCManager:
             return True
 
         try:
-            self._plc.batchwrite_wordunits(f"D{D_BASE + _OFF_BT_ERROR}", [self._bt_error_mask])
+            self._locked_write(f"D{D_BASE + _OFF_BT_ERROR}", [self._bt_error_mask])
             return True
         except Exception as e:
             print(f"寫入 D513 失敗: {e}")
@@ -366,7 +380,7 @@ class PLCManager:
             return True
 
         try:
-            self._plc.batchwrite_wordunits(f"D{D_BASE + _OFF_OK_START}", values)
+            self._locked_write(f"D{D_BASE + _OFF_OK_START}", values)
             return True
         except Exception as e:
             print(f"寫入 OK/NG 計數失敗: {e}")
@@ -464,7 +478,7 @@ class PLCManager:
         try:
             if not self._plc:
                 return None
-            raw = self._plc.batchread_wordunits(f"D{D_BASE}", D_READ_SIZE)
+            raw = self._locked_read(f"D{D_BASE}", D_READ_SIZE)
             data = PLCData()
             data.trigger = raw[_OFF_TRIGGER]
             data.results = raw[_OFF_RESULT_START:_OFF_RESULT_END + 1]
@@ -515,7 +529,7 @@ class PLCManager:
             return True
 
         try:
-            self._plc.batchwrite_wordunits(f"D{D_BASE + _OFF_HEARTBEAT}", [value])
+            self._locked_write(f"D{D_BASE + _OFF_HEARTBEAT}", [value])
             return True
         except Exception as e:
             print(f"寫入心跳失敗: {e}")
@@ -527,7 +541,7 @@ class PLCManager:
             print("[模擬] 清除 D541=0")
             return True
         try:
-            self._plc.batchwrite_wordunits(f"D{D_BASE + _OFF_RESET}", [0])
+            self._locked_write(f"D{D_BASE + _OFF_RESET}", [0])
             return True
         except Exception as e:
             print(f"清除 D541 失敗: {e}")
