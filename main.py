@@ -2203,9 +2203,9 @@ def build_ui():
                 ui.button('確認', on_click=stop_alert_flash).props('color=white text-color=red dense size=lg').classes('px-6') \
                     .tooltip('停止警報閃爍並隱藏紅色橫幅；不會解除實際異常（請按「異常復歸」）')
         with ui.row().classes('w-full items-start gap-3'):
-            if is_master: build_meter_block('本機通道 (CH11, 9, 7, 5, 3, 1)', 1, 6, 'blue')
             if is_master: build_meter_block('Slave 通道 (CH12, 10, 8, 6, 4, 2)', 7, 12, 'orange')
-            else: build_meter_block('本機通道 (CH12, 10, 8, 6, 4, 2)', 7, 12, 'orange')
+            if is_master: build_meter_block('本機通道 (CH11, 9, 7, 5, 3, 1)', 1, 6, 'blue')
+            if not is_master: build_meter_block('本機通道 (CH12, 10, 8, 6, 4, 2)', 7, 12, 'orange')
             with ui.row().classes('flex-grow items-start gap-3 flex-wrap'):
                 with ui.card().classes('bg-slate-800 p-3'):
                     ui.label('目前設定').classes('text-lg text-white font-bold mb-2')
