@@ -425,11 +425,14 @@ def write_alarm_log(message: str, alarm_type: str = "其他"):
     safe_message = message.replace('"', '""')
     line = f'{timestamp},{alarm_type},"{safe_message}"\n'
 
-    # 本機寫入 (同步，固定路徑)
+    # 本機寫入 (同步)：跟 cycle log 共用 config.log_dir，放在 Alarm 子資料夾
     try:
-        _write_alarm_line(r"D:\logs\Alarm", today, line)
+        _write_alarm_line(os.path.join(config.log_dir, "Alarm"), today, line)
     except Exception as e:
-        print(f"[!] 寫入本機 Alarm Log 失敗: {e}")
+        err = f"[!] 寫入本機 Alarm Log 失敗: {e}"
+        print(err)
+        try: log_message(err)
+        except: pass
 
     # 遠端寫入：丟進佇列由 daemon worker 處理，呼叫端不阻塞
     if config.remote_alarm_dir:
@@ -455,8 +458,7 @@ def show_bt_disconnect_alert(channel: int):
     global alert_flash_timer, is_alert_visible
     if is_shutting_down or not alert_container or not alert_message_label: return
     display_name = get_channel_display_name(channel)
-    current_time = datetime.datetime.now().strftime("%H:%M:%S")
-    show_alert(f'[{current_time}] {display_name} 藍芽斷線!', alarm_type="藍芽斷線")
+    show_alert(f'{display_name} 藍芽斷線!', alarm_type="藍芽斷線")
 
 def check_temp_anomaly_all(values: dict):
     """檢查所有通道溫度異常 (僅 Master)，彙整顯示"""
