@@ -39,8 +39,15 @@ class _TeeWriter:
         return getattr(self.original, name)
 
 if multiprocessing.current_process().name == 'MainProcess':
-    os.makedirs('logs', exist_ok=True)
-    _log_filename = f'logs/debug_{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}.txt'
+    # 優先寫 D:\debug_log；若 D 槽不存在或無權限，fallback 回程式資料夾下 logs/
+    _debug_log_dir = r'D:\debug_log'
+    try:
+        os.makedirs(_debug_log_dir, exist_ok=True)
+    except Exception as _e:
+        _debug_log_dir = 'logs'
+        os.makedirs(_debug_log_dir, exist_ok=True)
+        print(f'[!] 無法建立 D:\\debug_log ({_e})，debug log fallback 到 {_debug_log_dir}/')
+    _log_filename = os.path.join(_debug_log_dir, f'debug_{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}.txt')
     _log_file = open(_log_filename, 'w', encoding='utf-8')
     sys.stdout = _TeeWriter(sys.stdout, _log_file)
     sys.stderr = _TeeWriter(sys.stderr, _log_file)
@@ -2083,7 +2090,12 @@ def build_ui():
     global meters_ui, log_console, plc_status_icon, network_status_icon, alert_container, alert_message_label, system_status_label, measure_status_label, plc_monitor_ui, batch_no_input, total_ok_label, total_ng_label, temp_anomaly_status_label, no_cover_anomaly_status_label
     is_master = config.network.mode == "master"
     ui.colors(primary='#5898d4', secondary='#26a69a', accent='#9c27b0', dark='#1d1d1d')
-    ui.add_head_html('<style>body { user-select: text !important; -webkit-user-select: text !important; }</style>')
+    ui.add_head_html('<style>'
+                     'body { user-select: text !important; -webkit-user-select: text !important; }'
+                     # 系統 Log 反向顯示：最新訊息在最上方
+                     '.flip-log { display: flex !important; flex-direction: column-reverse !important; }'
+                     '.flip-log .q-scrollarea__content { display: flex !important; flex-direction: column-reverse !important; }'
+                     '</style>')
     ui.keyboard(on_key=lambda e: ui.run_javascript('window.location.reload()') if e.key.f5 and e.action.keydown else None)
     build_settings_drawer()
     with ui.column().classes('w-full p-2 gap-2'):
@@ -2250,7 +2262,7 @@ def build_ui():
                                 plc_monitor_ui[f'result_{i}'] = ui.label('0').classes('text-white text-sm font-mono')
             with ui.card().classes('bg-slate-800 p-3 flex-grow').style('min-width: 600px'):
                 ui.label('系統 Log').classes('text-lg text-blue-300 font-bold mb-2')
-                log_console = ui.log(max_lines=100).classes('w-full text-base text-gray-300 font-mono').style('height: 100%; min-height: 300px')
+                log_console = ui.log(max_lines=100).classes('w-full text-base text-gray-300 font-mono flip-log').style('height: 100%; min-height: 300px')
 
 @ui.page('/')
 def main_page():

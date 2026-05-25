@@ -469,15 +469,16 @@ AppConfig
 
 ### 13.2 Alarm Log
 
-- 目錄: `D:\logs\Alarm\`
-- 檔名格式: `alarm_YYYYMMDD.txt`
+- 目錄: `<config.log_dir>/Alarm/`（與 cycle log 共用根目錄）
+- 檔名格式: `alarm_YYYYMMDD.csv`
 - 一天一個檔案
-- 格式: `[YYYY-MM-DD HH:MM:SS] 訊息內容`
+- 欄位: `日期時間, 異常類型, 詳細內容`
 - 所有經由 `show_alert()` 觸發的警報都會記錄
+- 遠端 alarm（若設定 `config.remote_alarm_dir`）非同步寫入，檔名加機台後綴 `alarm_YYYYMMDD_<machine>.csv`
 
 ### 13.3 Debug Log
 
-- 目錄: `logs/`
+- 目錄: `D:\debug_log\`（若 D 槽不可用，fallback 至程式資料夾下 `logs/`）
 - 檔名格式: `debug_YYYYMMDD_HHMMSS.txt`
 - 程式啟動時建立，stdout/stderr 同時輸出到檔案 (`_TeeWriter`)
 

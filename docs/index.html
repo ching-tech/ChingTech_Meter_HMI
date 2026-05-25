@@ -635,7 +635,7 @@
 
   <h3>B. 警報橫幅</h3>
   <div class="card danger">
-    <p>平時隱藏。當發生異常時會出現<strong>紅色閃爍橫幅</strong>，顯示警報訊息，右側有「確認」按鈕可關閉橫幅。警報內容會同時記錄到 <code>D:\logs\Alarm\</code> 下的 CSV 檔。</p>
+    <p>平時隱藏。當發生異常時會出現<strong>紅色閃爍橫幅</strong>，顯示警報訊息，右側有「確認」按鈕可關閉橫幅。警報內容會同時記錄到 <code>&lt;log_dir&gt;/Alarm/</code> 下的 CSV 檔（與 cycle log 共用根目錄）。</p>
   </div>
 
   <h3>C. 通道量測區</h3>
@@ -794,7 +794,7 @@
   <h3>異常記錄（Alarm CSV）</h3>
   <div class="card">
     <div class="card-title c-red">檔案位置</div>
-    <p><code>D:\logs\Alarm\alarm_{日期}.csv</code>（每天一個檔案）</p>
+    <p><code>&lt;log_dir&gt;/Alarm/alarm_{日期}.csv</code>（每天一個檔案，與 cycle log 共用根目錄；遠端如有設定另寫 <code>alarm_{日期}_{機台}.csv</code>）</p>
     <table>
       <tr><th>欄位</th><th>說明</th></tr>
       <tr><td>日期時間</td><td>YYYY-MM-DD HH:MM:SS</td></tr>
@@ -806,7 +806,7 @@
 
   <h3>Debug 記錄</h3>
   <div class="card">
-    <p>系統 Log 同步寫入 <code>logs/debug_{日期}_{時間}.txt</code>，包含所有 console 輸出，用於後續排查問題。</p>
+    <p>系統 Log 同步寫入 <code>D:\debug_log\debug_{日期}_{時間}.txt</code>（若 D 槽不可用，fallback 至程式資料夾下 <code>logs/</code>），包含所有 console 輸出，用於後續排查問題。</p>
   </div>
 </section>
 
