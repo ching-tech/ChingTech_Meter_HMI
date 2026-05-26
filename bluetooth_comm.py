@@ -40,6 +40,7 @@ class ThermometerDevice:
     state: ConnectionState = ConnectionState.DISCONNECTED
     last_data: Optional[ThermometerData] = None
     socket: Optional[object] = None
+    connect_generation: int = 0
 
 
 class BluetoothProtocol:
@@ -137,13 +138,19 @@ class BluetoothManager:
 
     def __init__(self, simulation_mode: bool = True,
                  connect_timeout: float = 10.0,
-                 reconnect_interval: float = 5.0):
+                 reconnect_interval: float = 5.0,
+                 max_parallel_connects: int = 3):
         self.simulation_mode = simulation_mode
         self.connect_timeout = connect_timeout
         self.reconnect_interval = reconnect_interval
+        try:
+            self.max_parallel_connects = max(1, int(max_parallel_connects))
+        except (TypeError, ValueError):
+            self.max_parallel_connects = 3
         self.devices: Dict[int, ThermometerDevice] = {}  # channel -> device
         self._running = False
         self._threads: List[threading.Thread] = []
+        self._lock = threading.RLock()
         self._on_data_callback: Optional[Callable[[int, ThermometerData], None]] = None
         self._on_state_callback: Optional[Callable[[int, ConnectionState], None]] = None
         self._is_channel_enabled: Optional[Callable[[int], bool]] = None
@@ -151,6 +158,7 @@ class BluetoothManager:
 
         # 追蹤正在連線中的 socket（用於 stop 時中斷）
         self._connecting_sockets: Dict[int, socket.socket] = {}
+        self._connect_threads: Dict[int, threading.Thread] = {}
 
         # 每個設備的接收 buffer
         self._recv_buffers: Dict[int, bytes] = {}
@@ -178,6 +186,36 @@ class BluetoothManager:
             return self._get_channel_name(channel)
         return f"通道{channel}"
 
+    def _close_socket(self, sock):
+        """關閉 socket；RFCOMM 連線中斷時 shutdown 可能失敗，忽略即可。"""
+        if not sock:
+            return
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except:
+            pass
+        try:
+            sock.close()
+        except:
+            pass
+
+    def _cleanup_connect_threads(self):
+        """移除已結束的 connect thread，保留仍卡住的 thread 以防重複 connect。"""
+        with self._lock:
+            for ch, thread in list(self._connect_threads.items()):
+                if not thread.is_alive():
+                    self._connect_threads.pop(ch, None)
+
+    def _abort_connect_attempt(self, device: ThermometerDevice, reason: str):
+        """中止正在進行的 connect()，並讓舊 thread 即使晚回來也不能改狀態。"""
+        with self._lock:
+            device.connect_generation += 1
+            sock = self._connecting_sockets.pop(device.channel, None)
+        self._close_socket(sock)
+        if device.state == ConnectionState.CONNECTING:
+            print(f"[!] {self._ch_name(device.channel)} 連線中止: {reason}")
+            self._update_state(device, ConnectionState.ERROR)
+
     def add_device(self, channel: int, mac_address: str):
         """新增設備"""
         self.devices[channel] = ThermometerDevice(
@@ -204,71 +242,99 @@ class BluetoothManager:
                 self._threads.append(thread)
 
         if not self.simulation_mode:
-            # 實體模式：啟動單一連線管理 thread（依序連接，不互搶）
+            # 實體模式：啟動單一連線管理 thread（批次並行連線，避免重複 connect）
             conn_thread = threading.Thread(target=self._connection_manager, daemon=True)
             conn_thread.start()
             self._threads.append(conn_thread)
 
     def _warmup_bluetooth_stack(self):
-        """暖機：用第一台設備的 MAC 觸發 Windows 藍芽堆疊初始化"""
-        first_mac = None
-        for device in self.devices.values():
-            if device.mac_address:
-                first_mac = device.mac_address
-                break
-        if not first_mac:
-            return
-
+        """暖機：建立 RFCOMM socket 觸發 Windows 藍牙模組載入，不探測連線設備。"""
         print("[*] 藍芽堆疊暖機中...")
+        sock = None
         try:
             sock = socket.socket(
                 socket.AF_BLUETOOTH,
                 socket.SOCK_STREAM,
                 socket.BTPROTO_RFCOMM
             )
-            sock.settimeout(3.0)  # 短 timeout，只是為了觸發堆疊初始化
-            sock.connect((first_mac, 1))
-            # 如果意外連上了就關掉，後面正式流程會再連
-            sock.close()
-            print("[*] 藍芽堆疊暖機完成 (探測連線成功)")
-        except Exception:
-            print("[*] 藍芽堆疊暖機完成 (探測連線失敗，屬正常)")
+            sock.settimeout(1.0)
+            print("[*] 藍芽堆疊暖機完成")
+        except Exception as e:
+            print(f"[*] 藍芽堆疊暖機略過: {e}")
         finally:
-            try:
-                sock.close()
-            except:
-                pass
-        # 等待堆疊消化探測連線
-        time.sleep(1.0)
+            self._close_socket(sock)
+        # 等待堆疊完成初始化
+        time.sleep(0.5)
 
     def _connect_parallel(self, channels: list):
-        """同時對多個通道發起連線，等待全部回應，回傳各通道結果"""
+        """批次並行連線，避免 6 個 RFCOMM connect 同時壓垮 Windows 藍牙堆疊。"""
         results = {}  # channel -> True/False
 
-        def _try_connect(channel):
-            device = self.devices[channel]
-            self._connect_device(device)
-            results[channel] = (device.state == ConnectionState.CONNECTED)
+        for start in range(0, len(channels), self.max_parallel_connects):
+            if not self._running:
+                break
 
-        # 每個通道一個 thread 同時連線
-        threads = []
-        for ch in channels:
-            t = threading.Thread(target=_try_connect, args=(ch,), daemon=True)
-            threads.append(t)
-            t.start()
+            self._cleanup_connect_threads()
+            batch = channels[start:start + self.max_parallel_connects]
+            running_threads = []
 
-        # 等待所有連線嘗試完成
-        for t in threads:
-            t.join(timeout=self.connect_timeout + 5)
+            for ch in batch:
+                device = self.devices.get(ch)
+                if not device:
+                    results[ch] = False
+                    continue
+                if self._is_channel_enabled and not self._is_channel_enabled(ch):
+                    results[ch] = False
+                    continue
+                if device.state == ConnectionState.CONNECTED:
+                    results[ch] = True
+                    continue
+
+                with self._lock:
+                    existing_thread = self._connect_threads.get(ch)
+                    if existing_thread and existing_thread.is_alive():
+                        print(f"[*] {self._ch_name(ch)} 仍在連線中，略過重複 connect")
+                        results[ch] = False
+                        continue
+
+                outcome = {"success": False}
+
+                def _try_connect(dev=device, result=outcome):
+                    result["success"] = self._connect_device(dev)
+
+                thread = threading.Thread(target=_try_connect, daemon=True)
+                with self._lock:
+                    self._connect_threads[ch] = thread
+                running_threads.append((ch, device, thread, outcome))
+                thread.start()
+
+            deadline = time.time() + self.connect_timeout + 1.0
+            for ch, device, thread, outcome in running_threads:
+                remaining = max(0.0, deadline - time.time())
+                thread.join(timeout=remaining)
+                if thread.is_alive():
+                    self._abort_connect_attempt(device, "connect timeout")
+                    thread.join(timeout=0.5)
+
+                if thread.is_alive():
+                    results[ch] = False
+                else:
+                    with self._lock:
+                        if self._connect_threads.get(ch) is thread:
+                            self._connect_threads.pop(ch, None)
+                    results[ch] = outcome["success"]
+
+            if self._running and start + self.max_parallel_connects < len(channels):
+                time.sleep(0.5)
 
         return results
 
     def _connection_manager(self):
-        """初始化：所有啟用通道同時連線；之後監控斷線重連"""
+        """初始化：所有啟用通道批次連線；之後監控斷線重連"""
         # 首次啟動先暖機
         self._warmup_bluetooth_stack()
 
-        # --- 初始化：所有啟用通道同時連線 ---
+        # --- 初始化：所有啟用通道批次連線 ---
         enabled_channels = [
             ch for ch, dev in self.devices.items()
             if dev.mac_address and (not self._is_channel_enabled or self._is_channel_enabled(ch))
@@ -276,7 +342,7 @@ class BluetoothManager:
 
         if enabled_channels:
             names = [self._ch_name(ch) for ch in enabled_channels]
-            print(f"[*] 同時連線 {len(enabled_channels)} 個通道: {', '.join(names)}")
+            print(f"[*] 批次連線 {len(enabled_channels)} 個通道 (每批最多 {self.max_parallel_connects} 個): {', '.join(names)}")
             results = self._connect_parallel(enabled_channels)
 
             ok = [self._ch_name(ch) for ch, success in results.items() if success]
@@ -307,6 +373,10 @@ class BluetoothManager:
                     return
                 if self._is_channel_enabled and not self._is_channel_enabled(channel):
                     continue
+                with self._lock:
+                    connect_thread = self._connect_threads.get(channel)
+                    if connect_thread and connect_thread.is_alive():
+                        continue
                 if device.state == ConnectionState.CONNECTED or not device.mac_address:
                     fail_counts[channel] = 0
                     next_retry_time.pop(channel, None)
@@ -316,9 +386,8 @@ class BluetoothManager:
                 channels_to_reconnect.append(channel)
 
             if channels_to_reconnect:
-                # 斷線重連也用同時連線
                 names = [self._ch_name(ch) for ch in channels_to_reconnect]
-                print(f"[*] 重連 {len(channels_to_reconnect)} 個通道: {', '.join(names)}")
+                print(f"[*] 批次重連 {len(channels_to_reconnect)} 個通道: {', '.join(names)}")
                 results = self._connect_parallel(channels_to_reconnect)
 
                 for ch, success in results.items():
@@ -341,22 +410,23 @@ class BluetoothManager:
     def stop(self):
         """停止藍芽管理器"""
         self._running = False
+        with self._lock:
+            connecting_sockets = list(self._connecting_sockets.values())
+            self._connecting_sockets.clear()
+            connected_sockets = []
+            for device in self.devices.values():
+                device.connect_generation += 1
+                if device.socket:
+                    connected_sockets.append(device.socket)
+                    device.socket = None
+                device.state = ConnectionState.DISCONNECTED
+
         # 關閉正在等待 connect() 的 socket（中斷 timeout 等待）
-        for sock in self._connecting_sockets.values():
-            try:
-                sock.close()
-            except:
-                pass
-        self._connecting_sockets.clear()
+        for sock in connecting_sockets:
+            self._close_socket(sock)
         # 關閉已連線的 socket
-        for device in self.devices.values():
-            if device.socket:
-                try:
-                    device.socket.close()
-                except:
-                    pass
-                device.socket = None
-            device.state = ConnectionState.DISCONNECTED
+        for sock in connected_sockets:
+            self._close_socket(sock)
 
     def send_ack(self, channel: int, success: bool = True) -> bool:
         """發送 CB 回應 (ACK)"""
@@ -374,10 +444,11 @@ class BluetoothManager:
 
         try:
             packet = BluetoothProtocol.build_cb_response(success)
-            device.socket.send(packet)
+            device.socket.sendall(packet)
             return True
         except Exception as e:
             print(f"發送 CB 回應失敗 ({self._ch_name(channel)}): {e}")
+            self._disconnect_device(device)
             return False
 
     def request_measurement(self, channel: int) -> bool:
@@ -396,10 +467,11 @@ class BluetoothManager:
 
         try:
             packet = BluetoothProtocol.build_cd_request()
-            device.socket.send(packet)
+            device.socket.sendall(packet)
             return True
         except Exception as e:
             print(f"發送 CD 指令失敗 ({self._ch_name(channel)}): {e}")
+            self._disconnect_device(device)
             return False
 
     def request_all_measurements(self) -> int:
@@ -445,7 +517,7 @@ class BluetoothManager:
         while self._running:
             # 通道停用時：斷開連線
             if self._is_channel_enabled and not self._is_channel_enabled(channel):
-                if device.state == ConnectionState.CONNECTED:
+                if device.state in (ConnectionState.CONNECTED, ConnectionState.CONNECTING):
                     self._disconnect_device(device)
                 time.sleep(2.0)
                 continue
@@ -458,26 +530,27 @@ class BluetoothManager:
 
     def _connect_device(self, device: ThermometerDevice):
         """連接設備 (使用 Windows 原生藍芽 socket)"""
+        with self._lock:
+            device.connect_generation += 1
+            generation = device.connect_generation
         self._update_state(device, ConnectionState.CONNECTING)
 
         if self.simulation_mode:
             # 模擬模式：直接設定為已連線
             time.sleep(0.5)
             self._update_state(device, ConnectionState.CONNECTED)
-            return
+            return True
 
         if not device.mac_address:
             self._update_state(device, ConnectionState.DISCONNECTED)
-            return
+            return False
 
         # 強制關閉舊 socket，確保 Windows 藍芽堆疊釋放連線
         if device.socket:
-            try:
-                device.socket.close()
-            except:
-                pass
+            self._close_socket(device.socket)
             device.socket = None
 
+        sock = None
         try:
             print(f"[*] 嘗試連線 {self._ch_name(device.channel)} -> {device.mac_address}")
             sock = socket.socket(
@@ -485,32 +558,49 @@ class BluetoothManager:
                 socket.SOCK_STREAM,
                 socket.BTPROTO_RFCOMM
             )
-            self._connecting_sockets[device.channel] = sock
+            with self._lock:
+                if generation != device.connect_generation or not self._running:
+                    self._close_socket(sock)
+                    return False
+                self._connecting_sockets[device.channel] = sock
             sock.settimeout(self.connect_timeout)
             sock.connect((device.mac_address, 1))
-            self._connecting_sockets.pop(device.channel, None)
             sock.settimeout(2)
-            device.socket = sock
+
+            with self._lock:
+                self._connecting_sockets.pop(device.channel, None)
+                disabled = self._is_channel_enabled and not self._is_channel_enabled(device.channel)
+                if generation != device.connect_generation or not self._running or disabled:
+                    self._close_socket(sock)
+                    if device.state == ConnectionState.CONNECTING:
+                        self._update_state(device, ConnectionState.DISCONNECTED)
+                    return False
+                device.socket = sock
             print(f"[+] 藍芽連線成功: {self._ch_name(device.channel)} ({device.mac_address})")
             self._update_state(device, ConnectionState.CONNECTED)
+            return True
         except Exception as e:
-            self._connecting_sockets.pop(device.channel, None)
-            try:
-                sock.close()
-            except:
-                pass
+            with self._lock:
+                current_sock = self._connecting_sockets.get(device.channel)
+                if current_sock is sock:
+                    self._connecting_sockets.pop(device.channel, None)
+            self._close_socket(sock)
             print(f"[!] {self._ch_name(device.channel)} 連線失敗: {e}")
-            self._update_state(device, ConnectionState.ERROR)
+            if generation == device.connect_generation and self._running:
+                self._update_state(device, ConnectionState.ERROR)
+            return False
 
 
     def _disconnect_device(self, device: ThermometerDevice):
         """斷開設備"""
-        if device.socket:
-            try:
-                device.socket.close()
-            except:
-                pass
+        with self._lock:
+            device.connect_generation += 1
+            sock = device.socket
             device.socket = None
+            connecting_sock = self._connecting_sockets.pop(device.channel, None)
+            self._recv_buffers.pop(device.channel, None)
+        self._close_socket(sock)
+        self._close_socket(connecting_sock)
         self._update_state(device, ConnectionState.DISCONNECTED)
 
     def _receive_data(self, device: ThermometerDevice):
@@ -519,7 +609,11 @@ class BluetoothManager:
             return
 
         try:
-            data = device.socket.recv(1024)
+            sock = device.socket
+            if not sock:
+                self._update_state(device, ConnectionState.DISCONNECTED)
+                return
+            data = sock.recv(1024)
             if not data:
                 # 對方關閉連線
                 print(f"連線中斷 ({self._ch_name(device.channel)}): 對方已關閉")

@@ -17,7 +17,8 @@
       ""
     ],
     "reconnect_interval": 5.0,
-    "timeout": 10.0
+    "timeout": 10.0,
+    "max_parallel_connects": 3
   },
   "plc": {
     "enabled": false,

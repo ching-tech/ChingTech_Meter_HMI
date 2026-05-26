@@ -144,7 +144,8 @@ def init_managers():
     bt_manager = BluetoothManager(
         simulation_mode=config.bt_simulation_mode,
         connect_timeout=config.bluetooth.timeout,
-        reconnect_interval=config.bluetooth.reconnect_interval
+        reconnect_interval=config.bluetooth.reconnect_interval,
+        max_parallel_connects=config.bluetooth.max_parallel_connects
     )
     bt_manager.set_callbacks(on_data=on_bluetooth_data, on_state=on_bluetooth_state, is_channel_enabled=is_channel_enabled, get_channel_name=get_channel_display_name)
 
@@ -1391,6 +1392,7 @@ def _refresh_ui_from_config():
     # 藍芽
     if bt_inputs.get('reconnect_interval'): bt_inputs['reconnect_interval'].set_value(config.bluetooth.reconnect_interval)
     if bt_inputs.get('timeout'): bt_inputs['timeout'].set_value(config.bluetooth.timeout)
+    if bt_inputs.get('max_parallel_connects'): bt_inputs['max_parallel_connects'].set_value(config.bluetooth.max_parallel_connects)
     for ch, mac_input in bt_mac_inputs.items():
         idx = ch - 1 if ch <= 6 else ch - 7
         if idx < len(config.bluetooth.device_addresses):
@@ -1575,10 +1577,13 @@ def _collect_settings_from_ui():
     if plc_inputs.get('port'): config.plc.port = int(plc_inputs['port'].value)
     config.bluetooth.reconnect_interval = bt_inputs['reconnect_interval'].value
     config.bluetooth.timeout = bt_inputs['timeout'].value
+    if bt_inputs.get('max_parallel_connects'):
+        config.bluetooth.max_parallel_connects = max(1, min(6, int(bt_inputs['max_parallel_connects'].value)))
     # 同步到 bt_manager（運行中即時生效）
     if bt_manager:
         bt_manager.connect_timeout = config.bluetooth.timeout
         bt_manager.reconnect_interval = config.bluetooth.reconnect_interval
+        bt_manager.max_parallel_connects = config.bluetooth.max_parallel_connects
     for ch, mac_input in bt_mac_inputs.items():
         idx = ch - 1 if ch <= 6 else ch - 7
         if idx < len(config.bluetooth.device_addresses): config.bluetooth.device_addresses[idx] = mac_input.value
@@ -2038,6 +2043,10 @@ def build_settings_drawer():
                             ui.label('超時:').classes('text-gray-300 w-28')
                             bt_inputs['timeout'] = ui.number(value=config.bluetooth.timeout).props('outlined dense suffix=秒').classes('w-24') \
                                 .tooltip('藍芽連線等待逾時時間，秒')
+                        with ui.row().classes('items-center'):
+                            ui.label('批次連線數:').classes('text-gray-300 w-28')
+                            bt_inputs['max_parallel_connects'] = ui.number(value=config.bluetooth.max_parallel_connects, min=1, max=6, step=1).props('outlined dense').classes('w-24') \
+                                .tooltip('啟動或重連時每批最多同時連線幾支耳溫槍；建議 3，若藍芽不穩可降為 2')
                 with ui.expansion('通道啟用', icon='toggle_on').classes('w-full bg-slate-800'):
                     ch_range = range(1, 13) if is_master else range(7, 13)
                     with ui.grid(columns=6).classes('w-full gap-1'):
