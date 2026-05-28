@@ -29,9 +29,8 @@ ENV/
 .nicegui/
 
 # Logs
-logs/*.csv
+logs/
 *.log
-logs/*.txt
 
 # OS generated files
 .DS_Store
@@ -43,5 +42,6 @@ main.spec
 config.json
 .claude/
 .gemini/
+.agents/
 internal/
 nul
