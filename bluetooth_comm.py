@@ -137,7 +137,7 @@ class BluetoothManager:
     """藍芽連線管理器"""
 
     def __init__(self, simulation_mode: bool = True,
-                 connect_timeout: float = 10.0,
+                 connect_timeout: float = 5.0,
                  reconnect_interval: float = 5.0,
                  max_parallel_connects: int = 3):
         self.simulation_mode = simulation_mode
@@ -524,7 +524,7 @@ class BluetoothManager:
 
             if device.state == ConnectionState.CONNECTED:
                 self._receive_data(device)
-                time.sleep(0.1)
+                # sock.recv() 已有 2s timeout 會自然 block，這裡不需再 sleep
             else:
                 time.sleep(1.0)  # 未連線時低頻等待，連線由 _connection_manager 處理
 
