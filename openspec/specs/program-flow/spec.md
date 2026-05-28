@@ -84,7 +84,7 @@ on_measurement_complete(result)
   │   └─ 寫入 CSV 一列 (量測觸發)
   └─ [Master] PLC 回寫:
      ├─ 內部通道→邏輯通道映射 (透過 CHANNEL_DISPLAY_NAMES)
-     ├─ plc_manager.write_results(logical_results) → D501-D512 (0=PASS, 1=FAIL)
+     ├─ plc_manager.write_results(logical_results) → D501-D512 (0=OK, 1=NG, 2=不使用)
      ├─ plc_manager.write_complete_signal() → D500=0
      └─ update_plc_display()
      注意: OK/NG 計數由 PLC 自行累加，HMI 不寫 D517~D540

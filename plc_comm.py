@@ -40,7 +40,7 @@ class PLCConnectionState(Enum):
 class PLCData:
     """D500~D541 暫存器快照"""
     trigger: int = 0                                # D500: 量測觸發
-    results: List[int] = field(default_factory=lambda: [0] * 12)  # D501~D512
+    results: List[int] = field(default_factory=lambda: [2] * 12)  # D501~D512 (0=OK, 1=NG, 2=不使用)
     bt_error: int = 0                               # D513: 藍芽連線狀態 bit mask
     heartbeat: int = 0                              # D514: PC 心跳
     empty_trigger: int = 0                          # D515: 空槍測試觸發
@@ -206,15 +206,15 @@ class PLCManager:
 
     def write_results(self, results: List[int]) -> bool:
         """寫入 12 通道判定結果至 D501~D512
-        0=不使用, 1=FAIL, 2=PASS
+        0=OK, 1=NG, 2=不使用
         """
         if self._state != PLCConnectionState.CONNECTED:
             return False
 
         values = list(results[:12])
-        # 補足 12 個
+        # 補足 12 個 (預設 2=不使用)
         while len(values) < 12:
-            values.append(0)
+            values.append(2)
 
         if self.simulation_mode:
             print(f"[模擬] 寫入判定結果 D501~D512: {values}")

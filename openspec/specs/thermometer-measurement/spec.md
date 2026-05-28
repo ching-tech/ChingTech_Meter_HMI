@@ -75,13 +75,13 @@
 系統 SHALL 將 12 通道的 PASS/FAIL 結果及統計數據寫入 PLC 暫存器。
 
 #### PLC Result Registers
-- **D501-D512:** 通道 1-12 判定結果 (0=PASS, 1=FAIL)
+- **D501-D512:** 通道 1-12 判定結果 (0=OK, 1=NG, 2=不使用)
 - **D517-D528:** 通道 1-12 OK 計數
 - **D529-D540:** 通道 1-12 NG 計數
 
 #### Scenario: Send results to PLC
 - **WHEN** 系統完成 12 通道的 PASS/FAIL 判斷
-- **THEN** 系統將各通道結果 (PASS=0, FAIL=1) 寫入 D501-D512
+- **THEN** 系統將各通道結果 (OK=0, NG=1, 不使用=2) 寫入 D501-D512
 - **AND** 系統更新累計 OK/NG 計數至對應暫存器
 
 ### Requirement: Master-Slave Data Aggregation

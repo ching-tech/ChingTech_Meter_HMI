@@ -99,11 +99,11 @@
 
 ### 5.2 D501~D512 判定值
 
-| 值 | 意義 |
+| 値 | 意義 |
 |---|---|
-| 0 | 不使用 (通道停用) |
-| 1 | FAIL |
-| 2 | PASS |
+| 0 | OK (PASS) |
+| 1 | NG (FAIL) |
+| 2 | 不使用 (通道停用) |
 
 ### 5.3 D513 異常 bitmask
 
@@ -381,7 +381,7 @@ handle_shutdown()
 
 | 模式 | D501~D512 寫入 |
 |---|---|
-| NORMAL | 依實際判定: 2=PASS, 1=FAIL, 0=不使用 |
+| NORMAL | 依實際判定: 0=OK, 1=NG, 2=不使用 |
 | FORCE_OK | 全部強制 PASS |
 | FORCE_NG | 全部強制 FAIL |
 
@@ -391,9 +391,9 @@ handle_shutdown()
 for internal_ch in range(1, 13):
     logical_idx = int(CH名稱.replace('CH','')) - 1
     if 通道啟用:
-        logical_results[logical_idx] = 2 if PASS else 1
+        logical_results[logical_idx] = 0 if PASS else 1
     else:
-        logical_results[logical_idx] = 0  # 不使用
+        logical_results[logical_idx] = 2  # 不使用
 # 寫入 D501~D512
 plc_manager.write_results(logical_results)
 # 完成後清除觸發

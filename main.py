@@ -953,18 +953,18 @@ def on_measurement_complete(result):
             _enqueue_remote_cycle_log(plc_manager.plc_data if plc_manager else None)
 
     if plc_manager:
-        # 0=不使用, 1=FAIL, 2=PASS
-        logical_results = [0]*12
+        # 0=OK, 1=NG, 2=不使用
+        logical_results = [2]*12
         current_results = measure_manager.get_results()
         for internal_ch in range(1, 13):
             display_name = get_channel_display_name(internal_ch)
             logical_idx = int(display_name.replace('CH', '')) - 1
             if is_channel_enabled(internal_ch):
-                logical_results[logical_idx] = 2 if current_results[internal_ch - 1] else 1
-            # 未啟用的通道保持 0 (不使用)
+                logical_results[logical_idx] = 0 if current_results[internal_ch - 1] else 1
+            # 未啟用的通道保持 2 (不使用)
 
         log_message(f"[流程] 寫入 PLC 判定結果 D501~D512: {logical_results}")
-        # 寫判定結果 (D501~D512): 0=不使用, 1=FAIL, 2=PASS
+        # 寫判定結果 (D501~D512): 0=OK, 1=NG, 2=不使用
         s1 = plc_manager.write_results(logical_results)
         log_message(f"[流程] write_results: {'成功' if s1 else '失敗'}")
         if s1:
@@ -1783,9 +1783,9 @@ def update_plc_display():
         for i in range(12):
             key = f'result_{i}'
             if key in plc_monitor_ui:
-                val = data.results[i] if i < len(data.results) else 0
+                val = data.results[i] if i < len(data.results) else 2
                 plc_monitor_ui[key].set_text(str(val))
-                if val == 2:
+                if val == 0:
                     plc_monitor_ui[key].classes('text-green-400', remove='text-red-400 text-white')
                 elif val == 1:
                     plc_monitor_ui[key].classes('text-red-400', remove='text-green-400 text-white')

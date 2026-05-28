@@ -192,7 +192,7 @@ def main_page():
 
             # --- D501~D512 判定結果 (唯讀, HMI 寫入) ---
             with ui.card().classes('p-4 flex-grow'):
-                ui.label('判定結果 D501~D512 (HMI 寫入, 0=PASS 1=FAIL)').classes('font-bold border-b mb-2 text-slate-700')
+                ui.label('判定結果 D501~D512 (HMI 寫入, 0=OK 1=NG 2=不使用)').classes('font-bold border-b mb-2 text-slate-700')
                 with ui.row().classes('w-full justify-between'):
                     for i in range(1, 13):
                         with ui.column().classes('items-center'):

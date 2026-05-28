@@ -1027,7 +1027,7 @@
     <table>
       <tr><th>暫存器</th><th>名稱</th><th>方向</th><th>說明</th></tr>
       <tr><td><code>D500</code></td><td>量測觸發</td><td>PLC→HMI</td><td>升沿(0→1)觸發溫度量測</td></tr>
-      <tr><td><code>D501~D512</code></td><td>判定結果</td><td>HMI→PLC</td><td>0=不使用, 1=FAIL, 2=PASS</td></tr>
+      <tr><td><code>D501~D512</code></td><td>判定結果</td><td>HMI→PLC</td><td>0=OK, 1=NG, 2=不使用</td></tr>
       <tr><td><code>D513</code></td><td>異常掩碼</td><td>HMI→PLC</td><td>bit0~11:藍芽, bit12:溫度, bit13:無套, bit14:空槍</td></tr>
       <tr><td><code>D514</code></td><td>PC 心跳</td><td>HMI→PLC</td><td>0/1 每秒交替，PLC 可偵測 HMI 是否存活</td></tr>
       <tr><td><code>D515</code></td><td>空槍觸發</td><td>PLC→HMI</td><td>升沿觸發空槍量測</td></tr>
