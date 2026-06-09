@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://ching-tech.github.io/ChingTech_Meter_HMI/sitemap.xml
