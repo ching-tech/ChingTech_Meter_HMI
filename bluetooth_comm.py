@@ -230,16 +230,19 @@ class BluetoothManager:
 
         self._running = True
 
-        # 每個設備啟動獨立的資料接收 thread
+        # 每個設備都啟動 receive thread；不檢查 mac_address 是否為空。
+        # 否則啟動時 MAC 為空、之後在 UI 補填 MAC 的通道會永遠沒有 receive thread，
+        # connection_manager 雖然會連線成功，但 socket buffer 無人解析，量測時 last_data
+        # 始終為 None (必須重開程式才會在這裡補建 thread)。
+        # 沒 MAC 的 thread 會在 1s sleep loop 空轉，CPU 影響可忽略。
         for channel, device in self.devices.items():
-            if device.mac_address or self.simulation_mode:
-                thread = threading.Thread(
-                    target=self._receive_thread,
-                    args=(channel,),
-                    daemon=True
-                )
-                thread.start()
-                self._threads.append(thread)
+            thread = threading.Thread(
+                target=self._receive_thread,
+                args=(channel,),
+                daemon=True
+            )
+            thread.start()
+            self._threads.append(thread)
 
         if not self.simulation_mode:
             # 實體模式：啟動單一連線管理 thread（批次並行連線，避免重複 connect）
