@@ -64,6 +64,7 @@ from measurement import MeasurementManager, MeasurementState, JudgeResult, Judge
 is_shutting_down = False
 prev_bt_states = {}
 slave_bt_connecting_since = {}  # Slave 通道進入 CONNECTING 的時間戳 {ch: timestamp}
+_net_data_recv_at = {}  # Master 收到 Slave 各通道「真資料」封包的本機時刻 {ch: master_clock_ts}
 ear_cover_statuses = {}  # 儲存各通道最新的耳套狀態 (1111/0000)
 no_cover_consecutive = {}  # 各通道連續無套計數 {ch: int}
 temp_anomaly_active = False  # 溫度異常狀態
@@ -632,66 +633,84 @@ def on_plc_empty_trigger():
     try:
         measure_manager.start_empty_measurement()
         if config.bt_simulation_mode: bt_manager.set_simulation_mode_empty()
-        delay = config.timing.empty_collect_delay
+        delay = _PRE_COLLECT_DELAY
         log_message(f"[流程] 空槍: {delay}s 後開始收集")
         threading.Timer(delay, trigger_empty_ack_and_collect).start()
     except Exception as e:
         log_message(f"[錯誤] 無法啟動空槍量測: {e}")
         import traceback; traceback.print_exc()
 
-def _wait_for_slave_data(ts_before: dict, timeout: float = 3.0):
-    """等待 Slave 所有啟用通道的資料都更新（timestamp 比請求前更新）"""
-    # 找出需要等待的 Slave 通道 (CH7~12)
-    expected_channels = set()
-    for ch in range(7, 13):
-        if is_channel_enabled(ch):
-            expected_channels.add(ch)
-    if not expected_channels:
-        return
+# --- 壓桿量測時序常數 ---
+# 量測值由「PLC 壓桿物理接觸」觸發 BT 槍主動 auto-push，不是由 HMI 發 CD 觸發。
+# D515/D500=1 是在壓桿「上升後」才給，此時探頭已離開，再發 CD 會量到離開後的空值。
+# 因此生產流程改為：偵測觸發前壓桿產生的資料直接採用，不發 CD；只有閒置/手動測試
+# (無壓桿資料) 才發 CD 主動要資料。
+_PRESS_LOOKBACK = 2.5      # 觸發前這秒數內收到的 BT 資料視為「本次壓桿」產生 (零件間隔約 5s，2.5s 不會誤抓上一件)
+_PRESS_COLLECT_WAIT = 1.5  # 壓桿模式：等待掉隊通道補齊的最長秒數
+_CD_RESPONSE_TIMEOUT = 3.0 # 閒置/手動模式：發 CD 後等待回應的最長秒數
+_PRE_COLLECT_DELAY = 0.3   # 觸發後到開始收集的緩衝 (讓壓桿尾端封包到齊；原本固定 1s 是浪費)
 
+
+def _channel_latest_ts(channel: int) -> float:
+    """通道最新資料的時間戳 (皆為 Master 本機時鐘，可與觸發時間直接比較)。
+    本機 BT 用 last_data.timestamp (parse 時以本機時鐘戳記)；
+    Slave 通道用 Master 收到真資料封包的時刻 (_net_data_recv_at)，避免跨機器時鐘偏移。
+    註：此函式只在 Master 的量測流程呼叫 (Slave 走 on_network_command)。"""
+    if bt_manager and channel in bt_manager.devices:
+        d = bt_manager.get_last_data(channel)
+        if d:
+            return d.timestamp
+    return _net_data_recv_at.get(channel, 0.0)
+
+
+def _wait_fresh(threshold: float, timeout: float) -> set:
+    """輪詢直到所有啟用通道都有 timestamp >= threshold 的新資料或逾時，回傳已收齊的通道集合。"""
+    enabled = set(get_enabled_channel_list())
     deadline = time.time() + timeout
+    got = set()
     while time.time() < deadline:
-        received = net_manager.get_all_received_data()
-        all_ready = True
-        for ch in expected_channels:
-            pkt = received.get(ch)
-            if not pkt or pkt.timestamp <= ts_before.get(ch, 0):
-                all_ready = False
-                break
-        if all_ready:
-            return
+        got = {ch for ch in enabled if _channel_latest_ts(ch) >= threshold}
+        if got >= enabled:
+            return got
         time.sleep(0.1)
-    # timeout：記錄未到的通道
-    received = net_manager.get_all_received_data()
-    missing = [get_channel_display_name(ch) for ch in expected_channels
-               if ch not in received or received[ch].timestamp <= ts_before.get(ch, 0)]
-    if missing:
-        log_message(f"[警告] 等待 Slave 資料逾時，未收到: {', '.join(missing)}")
+    return {ch for ch in enabled if _channel_latest_ts(ch) >= threshold}
 
-def trigger_empty_ack_and_collect():
-    try:
-        log_message("[流程] 空槍: Timer 觸發，開始發送 BT/Slave 請求")
-        # 記錄請求前 Slave 資料的時間戳
-        slave_ts_before = {}
+
+def _acquire_and_collect(is_empty: bool):
+    """依「是否已有壓桿產生的新資料」決定取資料方式，收齊後進入收集判定。
+    - 壓桿模式：觸發前已有 BT 資料 → 直接採用，不發 CD (壓桿已上升，發 CD 會量到空值)。
+    - 閒置/手動模式：無壓桿資料 (多為手動寫 D515 測試) → 發 CD + 通知 Slave 主動要資料。"""
+    label = "空槍" if is_empty else "量測"
+    trigger_time = (_d515_triggered_at if is_empty else _d500_triggered_at) or time.time()
+    threshold = trigger_time - _PRESS_LOOKBACK
+    enabled = set(get_enabled_channel_list())
+    fresh_now = {ch for ch in enabled if _channel_latest_ts(ch) >= threshold}
+
+    if fresh_now:
+        log_message(f"[流程] {label}: 偵測壓桿資料 {len(fresh_now)}/{len(enabled)} 通道，補齊中…")
+        got = _wait_fresh(threshold, _PRESS_COLLECT_WAIT)
+    else:
+        log_message(f"[流程] {label}: 無壓桿資料，主動發 BT CD + 通知 Slave")
         if config.network.mode == "master" and net_manager:
-            for ch, pkt in net_manager.get_all_received_data().items():
-                slave_ts_before[ch] = pkt.timestamp
-            net_manager.send_command("request_empty")
-            log_message("[流程] 空槍: 已發送 Slave request_empty")
-        # 本地藍芽量測
-        bt_requested = []
+            net_manager.send_command("request_empty" if is_empty else "request_measure")
         for channel in bt_manager.devices.keys():
             if is_channel_enabled(channel):
                 bt_manager.request_measurement(channel)
-                bt_requested.append(get_channel_display_name(channel))
-        log_message(f"[流程] 空槍: 已發送 BT CD 指令 → {bt_requested}")
-        # 等待 Slave 資料到齊（最多 3 秒），本地 BT 回應通常更快
-        if config.network.mode == "master" and net_manager:
-            log_message("[流程] 空槍: 等待 Slave 資料...")
-            _wait_for_slave_data(slave_ts_before, timeout=3.0)
-        time.sleep(0.2)
-        log_message("[流程] 空槍: 開始收集空槍值")
+        got = _wait_fresh(threshold, _CD_RESPONSE_TIMEOUT)
+
+    missing = [get_channel_display_name(ch) for ch in enabled if ch not in got]
+    if missing:
+        log_message(f"[警告] {label}: 未取得本次新資料: {', '.join(missing)} (將沿用最後一筆)")
+    log_message(f"[流程] {label}: 開始收集{'空槍值' if is_empty else '量測值'}")
+    if is_empty:
         collect_empty_values()
+    else:
+        collect_measure_values()
+
+
+def trigger_empty_ack_and_collect():
+    try:
+        _acquire_and_collect(is_empty=True)
     except Exception as e:
         log_message(f"[錯誤] trigger_empty_ack_and_collect 異常: {e}")
         import traceback; traceback.print_exc()
@@ -705,7 +724,7 @@ def on_plc_measure_trigger():
     try:
         measure_manager.start_temperature_measurement()
         if config.bt_simulation_mode: bt_manager.set_simulation_mode_measure()
-        delay = config.timing.measure_collect_delay
+        delay = _PRE_COLLECT_DELAY
         log_message(f"[流程] 量測: {delay}s 後開始收集")
         threading.Timer(delay, trigger_measure_ack_and_collect).start()
     except Exception as e:
@@ -714,28 +733,7 @@ def on_plc_measure_trigger():
 
 def trigger_measure_ack_and_collect():
     try:
-        log_message("[流程] 量測: Timer 觸發，開始發送 BT/Slave 請求")
-        # 記錄請求前 Slave 資料的時間戳
-        slave_ts_before = {}
-        if config.network.mode == "master" and net_manager:
-            for ch, pkt in net_manager.get_all_received_data().items():
-                slave_ts_before[ch] = pkt.timestamp
-            net_manager.send_command("request_measure")
-            log_message("[流程] 量測: 已發送 Slave request_measure")
-        # 本地藍芽量測
-        bt_requested = []
-        for channel in bt_manager.devices.keys():
-            if is_channel_enabled(channel):
-                bt_manager.request_measurement(channel)
-                bt_requested.append(get_channel_display_name(channel))
-        log_message(f"[流程] 量測: 已發送 BT CD 指令 → {bt_requested}")
-        # 等待 Slave 資料到齊
-        if config.network.mode == "master" and net_manager:
-            log_message("[流程] 量測: 等待 Slave 資料...")
-            _wait_for_slave_data(slave_ts_before, timeout=3.0)
-        time.sleep(0.2)
-        log_message("[流程] 量測: 開始收集量測值")
-        collect_measure_values()
+        _acquire_and_collect(is_empty=False)
     except Exception as e:
         log_message(f"[錯誤] trigger_measure_ack_and_collect 異常: {e}")
         import traceback; traceback.print_exc()
@@ -786,6 +784,8 @@ def on_network_data(packet: MeterDataPacket):
     if packet.temperature == 0.0 and not packet.ear_cover:
         log_message(f"[NET] {display_name}: BT {packet.bt_state}")
     else:
+        # 真資料封包：用 Master 本機時鐘記錄收到時刻 (供壓桿資料新鮮度判斷，避免跨機器時鐘偏移)
+        _net_data_recv_at[ch] = time.time()
         ear_txt = "有耳溫套" if packet.ear_cover == "1111" else "無耳溫套" if packet.ear_cover == "0000" else ""
         log_message(f"[NET] {display_name}: {packet.temperature}°C {ear_txt}")
 
@@ -1812,7 +1812,7 @@ def update_plc_display():
         total_ng_label.set_text(str(sum(data.ng_counts[:12])))
 
 def build_settings_drawer():
-    global settings_drawer, timing_inputs, plc_inputs, bt_inputs, bt_mac_inputs, net_inputs, mode_select, tolerance_upper_input, tolerance_lower_input, empty_upper_input, empty_lower_input, settings_logged_in, protected_sections, temp_anomaly_switch, temp_anomaly_upper_input, temp_anomaly_lower_input, temp_anomaly_fields, no_cover_anomaly_switch, no_cover_anomaly_count_input, no_cover_anomaly_fields, machine_name_input, plc_sim_switch, bt_sim_switch, remote_log_dir_input, remote_alarm_dir_input
+    global settings_drawer, timing_inputs, plc_inputs, bt_inputs, bt_mac_inputs, net_inputs, mode_select, tolerance_upper_input, tolerance_lower_input, empty_upper_input, empty_lower_input, warmup_empty_threshold_input, settings_logged_in, protected_sections, temp_anomaly_switch, temp_anomaly_upper_input, temp_anomaly_lower_input, temp_anomaly_fields, no_cover_anomaly_switch, no_cover_anomaly_count_input, no_cover_anomaly_fields, machine_name_input, plc_sim_switch, bt_sim_switch, remote_log_dir_input, remote_alarm_dir_input
     is_master = config.network.mode == "master"
     protected_sections = []
 
