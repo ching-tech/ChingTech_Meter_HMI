@@ -435,7 +435,9 @@ class BluetoothManager:
             self._close_socket(sock)
 
     def send_ack(self, channel: int, success: bool = True) -> bool:
-        """發送 CB 回應 (ACK)"""
+        """發送 CB 回應 (ACK)。
+        ⚠ 目前主流程「不呼叫」此函式：cb_test 實測確認耳溫槍無需 CB(ACK) 即正常運作，
+        且送 CB 會讓槍進入「M」模式並擋掉 CD。保留此實作僅供日後换槍/换韌體時備用。"""
         device = self.devices.get(channel)
         if not device:
             return False

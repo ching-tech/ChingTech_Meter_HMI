@@ -192,7 +192,14 @@ class MeasurementManager:
             return False
 
     def start_empty_measurement(self):
-        """開始空槍量測"""
+        """開始空槍量測。
+        清空所有通道的空槍/量測值（新零件、新基準）：之後只有實際收到推送的通道會被
+        record_empty_values 填值，漏壓的通道自然維持 None，不會殘留上一輪舊值。"""
+        for ch in self._channels.values():
+            ch.empty_value = None
+            ch.measure_value = None
+            ch.error_value = None
+            ch.result = JudgeResult.WAIT
         self._update_state(MeasurementState.WAITING_EMPTY)
 
     def record_empty_value(self, channel: int, value: float):
@@ -220,8 +227,20 @@ class MeasurementManager:
             self._update_state(MeasurementState.EMPTY_DONE)
 
     def start_temperature_measurement(self):
-        """開始溫度量測"""
+        """開始溫度量測。
+        只清量測值（保留空槍基準）：之後只有實際收到推送的通道會被 record_measure_values
+        填值，漏壓的通道 measure_value 維持 None → 不算誤差、不判 PASS → 自然 NG。"""
+        for ch in self._channels.values():
+            ch.measure_value = None
+            ch.error_value = None
+            ch.result = JudgeResult.WAIT
         self._update_state(MeasurementState.WAITING_MEASURE)
+
+    def force_finalize(self):
+        """強制結束本輪量測（timeout 放行用）：未收到量測值的通道視為漏壓，不阻擋完成。
+        若已 COMPLETE 則不重複觸發。"""
+        if self._state != MeasurementState.COMPLETE:
+            self._finalize()
 
     def record_measure_value(self, channel: int, value: float):
         """記錄溫度量測值並判斷"""
@@ -386,7 +405,8 @@ class MeasurementManager:
             enabled_channels = []
 
         def get_temperature(ch_num):
-            """取得該 scan 通道的溫度值，停用或異常回傳 0"""
+            """取得該 scan 通道的溫度值。
+            停用通道 → 0；啟用但漏壓 (值為 None) → 空白字串 (與停用的 0 區分)。"""
             int_ch = scan_to_internal.get(ch_num)
             if int_ch is None or int_ch not in enabled_channels:
                 return 0
@@ -395,8 +415,9 @@ class MeasurementManager:
                     val = self._channels[int_ch].empty_value
                 else:
                     val = self._channels[int_ch].measure_value
-                return val if val is not None else 0
-            return 0
+                # 啟用通道但無值 = 漏壓 → 留空白
+                return val if val is not None else ""
+            return ""
 
         # 先建立完整 row，再交給 _write_cycle_row 處理 (主檔失敗會 fallback)
         row = []
@@ -410,7 +431,8 @@ class MeasurementManager:
         # B~M欄: 12 支槍的數值 (scan1~scan12)
         for i in range(1, 13):
             val = get_temperature(i)
-            row.append(f"{val:.2f}" if isinstance(val, (int, float)) else "0")
+            # 數值 → 格式化；漏壓 (空字串) → 留空白
+            row.append(f"{val:.2f}" if isinstance(val, (int, float)) else "")
         # N欄: 時間
         row.append(time_str)
         # O欄: 誤差上限, P欄: 誤差下限

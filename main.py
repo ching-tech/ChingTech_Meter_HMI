@@ -65,6 +65,8 @@ is_shutting_down = False
 prev_bt_states = {}
 slave_bt_connecting_since = {}  # Slave 通道進入 CONNECTING 的時間戳 {ch: timestamp}
 _net_data_recv_at = {}  # Master 收到 Slave 各通道「真資料」封包的本機時刻 {ch: master_clock_ts}
+_consumed_ts = {}       # 各通道上一輪已採用的推送時間戳 {ch: ts}；新鮮度基準 (本輪推送須超過此值)
+_manual_trigger = False # 手動擷取旗標：True=本次 D515/D500 來自 UI 手動擷取 (發 CD)，False=生產 (純推送+漏壓偵測)
 _bt_disconnect_timers = {}  # 藍芽斷線去抖動 {logical_num: (threading.Timer, since_ts)}
 _bt_confirmed_down = set()   # 已確認斷線並回報 PLC 的通道 (logical_num)
 ear_cover_statuses = {}  # 儲存各通道最新的耳套狀態 (1111/0000)
@@ -665,38 +667,16 @@ def on_reset_button_click():
     """HMI 異常復歸按鈕 — 直接執行復歸邏輯"""
     on_plc_reset()
 
-def on_plc_empty_trigger():
-    global _d515_triggered_at
-    _d515_triggered_at = time.time()
-    enabled = get_enabled_channel_list()
-    log_message(f"[PLC] D515=1 空槍量測觸發 (啟用通道: {len(enabled)}個 {[get_channel_display_name(c) for c in enabled]})")
-    clear_meter_values(is_empty=True)
-    try:
-        measure_manager.start_empty_measurement()
-        if config.bt_simulation_mode: bt_manager.set_simulation_mode_empty()
-        delay = _PRE_COLLECT_DELAY
-        log_message(f"[流程] 空槍: {delay}s 後開始收集")
-        threading.Timer(delay, trigger_empty_ack_and_collect).start()
-    except Exception as e:
-        log_message(f"[錯誤] 無法啟動空槍量測: {e}")
-        import traceback; traceback.print_exc()
-
-# --- 壓桿量測時序常數 ---
-# 量測值由「PLC 壓桿物理接觸」觸發 BT 槍主動 auto-push，不是由 HMI 發 CD 觸發。
-# D515/D500=1 是在壓桿「上升後」才給，此時探頭已離開，再發 CD 會量到離開後的空值。
-# 因此生產流程改為：偵測觸發前壓桿產生的資料直接採用，不發 CD；只有閒置/手動測試
-# (無壓桿資料) 才發 CD 主動要資料。
-_PRESS_LOOKBACK = 2.5      # 觸發前這秒數內收到的 BT 資料視為「本次壓桿」產生 (零件間隔約 5s，2.5s 不會誤抓上一件)
-_PRESS_COLLECT_WAIT = 1.5  # 壓桿模式：等待掉隊通道補齊的最長秒數
-_CD_RESPONSE_TIMEOUT = 3.0 # 閒置/手動模式：發 CD 後等待回應的最長秒數
-_PRE_COLLECT_DELAY = 0.3   # 觸發後到開始收集的緩衝 (讓壓桿尾端封包到齊；原本固定 1s 是浪費)
+# --- 量測取值時序常數 ---
+# 量測值由「PLC 壓桿物理接觸」觸發 BT 槍主動 auto-push (cb_test 實測：閒置不推、只壓桿才推)。
+# 生產不發 CD (CD 只回快取值、不觸發新量測、漏壓時會回舊值)；漏壓靠「本輪未收到新推送」偵測。
+# 手動擷取無實體壓桿 → 例外發 CD 取快取值，不做漏壓偵測。
+_PRE_COLLECT_DELAY = 0.3   # 觸發後到開始收集的緩衝 (讓壓桿尾端封包到齊)
 
 
 def _channel_latest_ts(channel: int) -> float:
-    """通道最新資料的時間戳 (皆為 Master 本機時鐘，可與觸發時間直接比較)。
-    本機 BT 用 last_data.timestamp (parse 時以本機時鐘戳記)；
-    Slave 通道用 Master 收到真資料封包的時刻 (_net_data_recv_at)，避免跨機器時鐘偏移。
-    註：此函式只在 Master 的量測流程呼叫 (Slave 走 on_network_command)。"""
+    """通道最新資料的時間戳 (皆為 Master 本機時鐘)。
+    本機 BT 用 last_data.timestamp；Slave 通道用 Master 收到真資料封包的時刻 (_net_data_recv_at)。"""
     if bt_manager and channel in bt_manager.devices:
         d = bt_manager.get_last_data(channel)
         if d:
@@ -704,77 +684,124 @@ def _channel_latest_ts(channel: int) -> float:
     return _net_data_recv_at.get(channel, 0.0)
 
 
-def _wait_fresh(threshold: float, timeout: float) -> set:
-    """輪詢直到所有啟用通道都有 timestamp >= threshold 的新資料或逾時，回傳已收齊的通道集合。"""
-    enabled = set(get_enabled_channel_list())
+def _channel_latest_value(channel: int):
+    """通道最新一筆溫度值；本機 BT 用 last_data、Slave 用網路收到封包。無資料回 None。"""
+    if bt_manager and channel in bt_manager.devices:
+        d = bt_manager.get_last_data(channel)
+        if d:
+            return d.temperature
+    if net_manager:
+        pkt = net_manager.get_all_received_data().get(channel)
+        if pkt:
+            return pkt.temperature
+    return None
+
+
+def _wait_fresh_pushes(enabled: set, timeout: float) -> set:
+    """輪詢直到所有啟用通道都收到「比上一輪基準 (_consumed_ts) 更新」的推送，或逾時。
+    回傳已收到新推送的通道集合 (生產模式中，未在此集合者即漏壓)。"""
     deadline = time.time() + timeout
-    got = set()
-    while time.time() < deadline:
-        got = {ch for ch in enabled if _channel_latest_ts(ch) >= threshold}
-        if got >= enabled:
-            return got
+    def fresh():
+        return {ch for ch in enabled if _channel_latest_ts(ch) > _consumed_ts.get(ch, 0.0)}
+    got = fresh()
+    while got < enabled and time.time() < deadline:
         time.sleep(0.1)
-    return {ch for ch in enabled if _channel_latest_ts(ch) >= threshold}
+        got = fresh()
+    return got
 
 
-def _acquire_and_collect(is_empty: bool):
-    """依「是否已有壓桿產生的新資料」決定取資料方式，收齊後進入收集判定。
-    - 壓桿模式：觸發前已有 BT 資料 → 直接採用，不發 CD (壓桿已上升，發 CD 會量到空值)。
-    - 閒置/手動模式：無壓桿資料 (多為手動寫 D515 測試) → 發 CD + 通知 Slave 主動要資料。"""
+def _report_missed(missed: set, is_empty: bool):
+    """漏壓回報：設 D513 bit15 + 跳警報。漏壓通道值留 None (start_*_measurement 已清空，不再寫入)。
+    該通道 D501~D512 的 NG 由量測完成時 (on_measurement_complete) 對 None 自然判 NG 寫入。"""
+    if not missed:
+        return
+    names = [get_channel_display_name(ch) for ch in sorted(missed)]
     label = "空槍" if is_empty else "量測"
-    trigger_time = (_d515_triggered_at if is_empty else _d500_triggered_at) or time.time()
-    threshold = trigger_time - _PRESS_LOOKBACK
-    enabled = set(get_enabled_channel_list())
-    fresh_now = {ch for ch in enabled if _channel_latest_ts(ch) >= threshold}
+    log_message(f"[漏壓] {label}: 未收到量測值 {names}")
+    show_alert(f'未收到量測值: {", ".join(names)}（未壓到/未觸發）', alarm_type="漏壓")
+    for ch in missed:
+        set_meter_highlight(ch, True)   # 主畫面標紅該通道
+    if plc_manager:
+        plc_manager.set_d513_bit(15, True)
 
-    if fresh_now:
-        log_message(f"[流程] {label}: 偵測壓桿資料 {len(fresh_now)}/{len(enabled)} 通道，補齊中…")
-        got = _wait_fresh(threshold, _PRESS_COLLECT_WAIT)
-    else:
-        log_message(f"[流程] {label}: 無壓桿資料，主動發 BT CD + 通知 Slave")
+
+def _acquire_and_collect(is_empty: bool, is_manual: bool):
+    """生產：純主動推送 + 新鮮度 + timeout 放行 + 漏壓偵測。
+    手動 (UI 手動擷取，無實體壓桿)：發 CD 取快取值，不做漏壓偵測。"""
+    label = "空槍" if is_empty else "量測"
+    enabled = set(get_enabled_channel_list())
+    miss_timeout = config.bluetooth.miss_timeout
+
+    if is_manual:
+        log_message(f"[流程] {label}(手動): 發送 BT CD + 通知 Slave 取快取值")
         if config.network.mode == "master" and net_manager:
             net_manager.send_command("request_empty" if is_empty else "request_measure")
         for channel in bt_manager.devices.keys():
             if is_channel_enabled(channel):
                 bt_manager.request_measurement(channel)
-        got = _wait_fresh(threshold, _CD_RESPONSE_TIMEOUT)
-
-    missing = [get_channel_display_name(ch) for ch in enabled if ch not in got]
-    if missing:
-        log_message(f"[警告] {label}: 未取得本次新資料: {', '.join(missing)} (將沿用最後一筆)")
-    log_message(f"[流程] {label}: 開始收集{'空槍值' if is_empty else '量測值'}")
-    if is_empty:
-        collect_empty_values()
+        _wait_fresh_pushes(enabled, miss_timeout)  # 等回應到 (best effort)
+        got = set(enabled)   # 手動一律採用現有值 (含快取)，不標漏壓
+        missed = set()
     else:
-        collect_measure_values()
+        log_message(f"[流程] {label}: 等待主動推送 (逾時 {miss_timeout:.1f}s)…")
+        got = _wait_fresh_pushes(enabled, miss_timeout)
+        missed = enabled - got
+
+    # 更新基準時間戳 (只更新有收到新推送的通道，漏壓通道維持舊基準)
+    for ch in got:
+        _consumed_ts[ch] = _channel_latest_ts(ch)
+
+    log_message(f"[流程] {label}: 收齊 {len(got)}/{len(enabled)} 通道，開始收集")
+    if is_empty:
+        collect_empty_values(got, missed)
+    else:
+        collect_measure_values(got, missed)
 
 
-def trigger_empty_ack_and_collect():
+def on_plc_empty_trigger():
+    global _d515_triggered_at, _manual_trigger
+    _d515_triggered_at = time.time()
+    is_manual = _manual_trigger
+    _manual_trigger = False   # 消費旗標
+    enabled = get_enabled_channel_list()
+    log_message(f"[PLC] D515=1 空槍量測觸發{'(手動)' if is_manual else ''} (啟用通道: {len(enabled)}個 {[get_channel_display_name(c) for c in enabled]})")
+    clear_meter_values(is_empty=True)
     try:
-        _acquire_and_collect(is_empty=True)
+        measure_manager.start_empty_measurement()
+        if config.bt_simulation_mode: bt_manager.set_simulation_mode_empty()
+        log_message(f"[流程] 空槍: {_PRE_COLLECT_DELAY}s 後開始收集")
+        threading.Timer(_PRE_COLLECT_DELAY, lambda: trigger_empty_ack_and_collect(is_manual)).start()
+    except Exception as e:
+        log_message(f"[錯誤] 無法啟動空槍量測: {e}")
+        import traceback; traceback.print_exc()
+
+def trigger_empty_ack_and_collect(is_manual: bool = False):
+    try:
+        _acquire_and_collect(is_empty=True, is_manual=is_manual)
     except Exception as e:
         log_message(f"[錯誤] trigger_empty_ack_and_collect 異常: {e}")
         import traceback; traceback.print_exc()
 
 def on_plc_measure_trigger():
-    global _d500_triggered_at
+    global _d500_triggered_at, _manual_trigger
     _d500_triggered_at = time.time()
+    is_manual = _manual_trigger
+    _manual_trigger = False
     enabled = get_enabled_channel_list()
-    log_message(f"[PLC] D500=1 溫度量測觸發 (啟用通道: {len(enabled)}個 {[get_channel_display_name(c) for c in enabled]})")
+    log_message(f"[PLC] D500=1 溫度量測觸發{'(手動)' if is_manual else ''} (啟用通道: {len(enabled)}個 {[get_channel_display_name(c) for c in enabled]})")
     clear_meter_values(is_empty=False)
     try:
         measure_manager.start_temperature_measurement()
         if config.bt_simulation_mode: bt_manager.set_simulation_mode_measure()
-        delay = _PRE_COLLECT_DELAY
-        log_message(f"[流程] 量測: {delay}s 後開始收集")
-        threading.Timer(delay, trigger_measure_ack_and_collect).start()
+        log_message(f"[流程] 量測: {_PRE_COLLECT_DELAY}s 後開始收集")
+        threading.Timer(_PRE_COLLECT_DELAY, lambda: trigger_measure_ack_and_collect(is_manual)).start()
     except Exception as e:
         log_message(f"[錯誤] 無法執行溫度量測: {e}")
         import traceback; traceback.print_exc()
 
-def trigger_measure_ack_and_collect():
+def trigger_measure_ack_and_collect(is_manual: bool = False):
     try:
-        _acquire_and_collect(is_empty=False)
+        _acquire_and_collect(is_empty=False, is_manual=is_manual)
     except Exception as e:
         log_message(f"[錯誤] trigger_measure_ack_and_collect 異常: {e}")
         import traceback; traceback.print_exc()
@@ -1154,62 +1181,25 @@ def get_enabled_channel_list():
     """取得已啟用的通道列表"""
     return [ch for ch in range(1, 13) if is_channel_enabled(ch)]
 
-def collect_empty_values():
+def collect_empty_values(got: set, missed: set):
+    """收集空槍值。got=本輪收到新推送的通道、missed=漏壓通道。
+    漏壓通道不採值 (start_empty_measurement 已清空 → 維持 None)，並回報 D513 bit15 + 警報。"""
     # 清除停用通道的殘留資料
-    disabled = [get_channel_display_name(ch) for ch in range(1, 13) if not is_channel_enabled(ch)]
     for ch in range(1, 13):
         if not is_channel_enabled(ch):
             measure_manager.clear_channel(ch)
-    if disabled:
-        log_message(f"[流程] 空槍收集: 已清除停用通道 {disabled}")
 
+    # 只採用「本輪有新推送」的通道值
     values = {}
-    # 本機 BT
-    bt_got = []
-    bt_miss = []
-    for channel in bt_manager.devices.keys():
-        if is_channel_enabled(channel):
-            data = bt_manager.get_last_data(channel)
-            if data:
-                values[channel] = data.temperature
-                bt_got.append(f"{get_channel_display_name(channel)}={data.temperature:.2f}")
-            else:
-                bt_miss.append(get_channel_display_name(channel))
-    if bt_got:
-        log_message(f"[流程] 空槍收集 BT: {bt_got}")
-    if bt_miss:
-        log_message(f"[警告] 空槍收集 BT 無資料: {bt_miss}")
+    for ch in sorted(got):
+        v = _channel_latest_value(ch)
+        if v is not None:
+            values[ch] = v
+    if values:
+        log_message(f"[流程] 空槍收集: {[f'{get_channel_display_name(ch)}={v:.2f}' for ch, v in values.items()]}")
 
-    # Slave 網路
-    if config.network.mode == "master" and net_manager:
-        net_got = []
-        net_miss = []
-        for ch in range(7, 13):
-            if is_channel_enabled(ch):
-                pkt = net_manager.get_all_received_data().get(ch)
-                if pkt:
-                    values[ch] = pkt.temperature
-                    net_got.append(f"{get_channel_display_name(ch)}={pkt.temperature:.2f}")
-                else:
-                    net_miss.append(get_channel_display_name(ch))
-        if net_got:
-            log_message(f"[流程] 空槍收集 Slave: {net_got}")
-        if net_miss:
-            log_message(f"[警告] 空槍收集 Slave 無資料: {net_miss}")
-
-    # === 等待 BT 收齊：未收齊則 0.5s 後重試 (使用者按「流程解卡」會中止重試) ===
-    enabled = get_enabled_channel_list()
-    missing_chs = [ch for ch in enabled if ch not in values]
-    if missing_chs:
-        if measure_manager.state != MeasurementState.WAITING_EMPTY:
-            log_message(f"[流程] 空槍: 狀態為 {measure_manager.state.value}，停止重試")
-            return
-        miss_names = [get_channel_display_name(ch) for ch in missing_chs]
-        log_message(f"[流程] 空槍: 等待 BT 收齊 {miss_names}，0.5s 後重試")
-        threading.Timer(0.5, collect_empty_values).start()
-        return
-
-    log_message(f"[流程] 空槍收集完成: 共 {len(values)} 通道有值")
+    # 漏壓回報 (留 None、設 bit15、跳警報)
+    _report_missed(missed, is_empty=True)
     # 檢查空槍值是否超出上下限 (此函式由 D515=1 觸發流程呼叫，資料已收齊)
     global empty_out_of_range_count
     is_warmup = plc_manager and plc_manager.plc_data and plc_manager.plc_data.warmup == 1
@@ -1277,77 +1267,33 @@ def collect_empty_values():
         globals()['_d515_triggered_at'] = 0.0
         log_message("[PLC] 空槍值已寫入 Log，清除 D515")
 
-def collect_measure_values():
-    # 清除停用通道的殘留資料，避免 _all_measure_recorded 永遠等不到停用通道的量測值
-    disabled = [get_channel_display_name(ch) for ch in range(1, 13) if not is_channel_enabled(ch)]
+def collect_measure_values(got: set, missed: set):
+    """收集量測值。got=本輪收到新推送的通道、missed=漏壓通道。
+    漏壓通道不採值 (start_temperature_measurement 已清空 measure → 維持 None →
+    不算誤差、不判 PASS → 量測完成時自然寫 NG)，並回報 D513 bit15 + 警報。"""
+    # 清除停用通道的殘留資料
     for ch in range(1, 13):
         if not is_channel_enabled(ch):
             measure_manager.clear_channel(ch)
-    if disabled:
-        log_message(f"[流程] 量測收集: 已清除停用通道 {disabled}")
 
+    # 只採用「本輪有新推送」的通道值
     values = {}
-    # 本機 BT
-    bt_got = []
-    bt_miss = []
-    for channel in bt_manager.devices.keys():
-        if is_channel_enabled(channel):
-            data = bt_manager.get_last_data(channel)
-            if data:
-                values[channel] = data.temperature
-                bt_got.append(f"{get_channel_display_name(channel)}={data.temperature:.2f}")
-            else:
-                bt_miss.append(get_channel_display_name(channel))
-    if bt_got:
-        log_message(f"[流程] 量測收集 BT: {bt_got}")
-    if bt_miss:
-        log_message(f"[警告] 量測收集 BT 無資料: {bt_miss}")
+    for ch in sorted(got):
+        v = _channel_latest_value(ch)
+        if v is not None:
+            values[ch] = v
+    if values:
+        log_message(f"[流程] 量測收集: {[f'{get_channel_display_name(ch)}={v:.2f}' for ch, v in values.items()]}")
 
-    # Slave 網路
-    if config.network.mode == "master" and net_manager:
-        net_got = []
-        net_miss = []
-        for ch in range(7, 13):
-            if is_channel_enabled(ch):
-                pkt = net_manager.get_all_received_data().get(ch)
-                if pkt:
-                    values[ch] = pkt.temperature
-                    net_got.append(f"{get_channel_display_name(ch)}={pkt.temperature:.2f}")
-                else:
-                    net_miss.append(get_channel_display_name(ch))
-        if net_got:
-            log_message(f"[流程] 量測收集 Slave: {net_got}")
-        if net_miss:
-            log_message(f"[警告] 量測收集 Slave 無資料: {net_miss}")
+    # 漏壓回報 (留 None、設 bit15、跳警報)
+    _report_missed(missed, is_empty=False)
 
-    # === 等待 BT 收齊：未收齊則 0.5s 後重試 (使用者按「流程解卡」會中止重試) ===
-    enabled = get_enabled_channel_list()
-    missing_chs = [ch for ch in enabled if ch not in values]
-    if missing_chs:
-        if measure_manager.state != MeasurementState.WAITING_MEASURE:
-            log_message(f"[流程] 量測: 狀態為 {measure_manager.state.value}，停止重試")
-            return
-        miss_names = [get_channel_display_name(ch) for ch in missing_chs]
-        log_message(f"[流程] 量測: 等待 BT 收齊 {miss_names}，0.5s 後重試")
-        threading.Timer(0.5, collect_measure_values).start()
-        return
-
-    log_message(f"[流程] 量測收集完成: 共 {len(values)} 通道有值")
     measure_manager.record_measure_values(values)
+    # 強制結束本輪：漏壓通道 (有空槍無量測) 不阻擋 finalize → 觸發 on_measurement_complete
+    # 寫入 D501~D512 (漏壓通道 None → 非 PASS → NG) 並將 D500 歸 0 完成握手
+    measure_manager.force_finalize()
 
-    # 檢查 _all_measure_recorded 結果
-    all_done = measure_manager._all_measure_recorded()
-    log_message(f"[流程] _all_measure_recorded = {all_done}, 狀態 = {measure_manager.state.value}")
-    if not all_done:
-        # 列出阻塞的通道：有 empty_value 但沒 measure_value
-        blocking = []
-        for ch_data in measure_manager._channels.values():
-            if ch_data.empty_value is not None and ch_data.measure_value is None:
-                blocking.append(f"CH{ch_data.channel}(empty={ch_data.empty_value:.2f})")
-        if blocking:
-            log_message(f"[警告] 阻塞通道(有空槍無量測): {blocking}")
-
-    # D500=1 量測觸發：統一對所有通道 (含 Slave) 做異常檢測
+    # D500=1 量測觸發：對有值通道做異常檢測
     if config.network.mode == "master":
         check_temp_anomaly_all(values)
         covers = {ch: ear_cover_statuses[ch] for ch in values if ch in ear_cover_statuses}
@@ -1424,6 +1370,7 @@ def _refresh_ui_from_config():
     if bt_inputs.get('reconnect_interval'): bt_inputs['reconnect_interval'].set_value(config.bluetooth.reconnect_interval)
     if bt_inputs.get('timeout'): bt_inputs['timeout'].set_value(config.bluetooth.timeout)
     if bt_inputs.get('max_parallel_connects'): bt_inputs['max_parallel_connects'].set_value(config.bluetooth.max_parallel_connects)
+    if bt_inputs.get('miss_timeout'): bt_inputs['miss_timeout'].set_value(config.bluetooth.miss_timeout)
     for ch, mac_input in bt_mac_inputs.items():
         idx = ch - 1 if ch <= 6 else ch - 7
         if idx < len(config.bluetooth.device_addresses):
@@ -1611,6 +1558,9 @@ def _collect_settings_from_ui():
     config.bluetooth.timeout = bt_inputs['timeout'].value
     if bt_inputs.get('max_parallel_connects'):
         config.bluetooth.max_parallel_connects = max(1, min(6, int(bt_inputs['max_parallel_connects'].value)))
+    if bt_inputs.get('miss_timeout'):
+        try: config.bluetooth.miss_timeout = max(0.5, float(bt_inputs['miss_timeout'].value))
+        except (TypeError, ValueError): pass
     # 同步到 bt_manager（運行中即時生效）
     if bt_manager:
         bt_manager.connect_timeout = config.bluetooth.timeout
@@ -1718,10 +1668,13 @@ def on_apply_settings():
     ui.notify('設定已即時套用', type='positive')
 
 def on_simulate_empty():
+    # 手動擷取：無實體壓桿 → 設旗標讓觸發走「發 CD 取快取值」模式，不做漏壓偵測
+    globals()['_manual_trigger'] = True
     if plc_manager: plc_manager.write_empty_trigger(1)
     else: on_plc_empty_trigger()
 
 def on_simulate_measure():
+    globals()['_manual_trigger'] = True
     if plc_manager: plc_manager.write_measure_trigger(1)
     else: on_plc_measure_trigger()
 
@@ -2083,6 +2036,10 @@ def build_settings_drawer():
                             ui.label('批次連線數:').classes('text-gray-300 w-28')
                             bt_inputs['max_parallel_connects'] = ui.number(value=config.bluetooth.max_parallel_connects, min=1, max=6, step=1).props('outlined dense').classes('w-24') \
                                 .tooltip('啟動或重連時每批最多同時連線幾支耳溫槍；建議 3，若藍芽不穩可降為 2')
+                        with ui.row().classes('items-center'):
+                            ui.label('漏壓逾時:').classes('text-gray-300 w-28')
+                            bt_inputs['miss_timeout'] = ui.number(value=config.bluetooth.miss_timeout, min=0.5, step=0.5).props('outlined dense suffix=秒').classes('w-24') \
+                                .tooltip('生產量測觸發後等待主動推送的最長秒數；逾時仍未收到的啟用通道判定為漏壓 (預設 3 秒)。設長一點較能確認真漏壓')
                 with ui.expansion('通道啟用', icon='toggle_on').classes('w-full bg-slate-800'):
                     ch_range = range(1, 13) if is_master else range(7, 13)
                     with ui.grid(columns=6).classes('w-full gap-1'):

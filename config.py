@@ -37,6 +37,7 @@ class BluetoothConfig:
     reconnect_interval: float = 5.0  # 重連間隔 (秒)
     timeout: float = 5.0  # 連線超時 (秒)
     max_parallel_connects: int = 3  # 每批最多同時連線數，降低 Windows 藍牙堆疊卡死風險
+    miss_timeout: float = 3.0  # 漏壓判定逾時 (秒)：生產觸發後等這麼久仍未收到新推送即判漏壓
 
 @dataclass
 class PLCConfig:
