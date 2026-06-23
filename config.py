@@ -69,6 +69,7 @@ class MeasurementConfig:
     tolerance_lower: float = 0.5   # 誤差下限 (°C)，正值 magnitude；UI 顯示時自動 prefix "-"
     empty_upper: float = 40.0      # 空槍值上限 (°C)
     empty_lower: float = 20.0      # 空槍值下限 (°C)
+    warmup_empty_threshold: int = 3  # 暖槍中空槍超限「連續 N 次」才跳警報
     meter_count: int = 12          # 總通道數
     # 通道啟用狀態 (True=啟用, False=停用)
     channel_enabled: List[bool] = field(default_factory=lambda: [True] * 12)

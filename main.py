@@ -118,6 +118,7 @@ tolerance_upper_input = None
 tolerance_lower_input = None
 empty_upper_input = None
 empty_lower_input = None
+warmup_empty_threshold_input = None
 temp_anomaly_switch = None
 temp_anomaly_upper_input = None
 temp_anomaly_lower_input = None
@@ -1206,10 +1207,11 @@ def collect_empty_values():
 
     if out_of_range:
         if is_warmup:
-            # 暖槍中 D542=1：累計超限次數，達 3 次才發出警報
+            # 暖槍中 D542=1：累計超限次數，達設定次數才發出警報
             empty_out_of_range_count += 1
-            log_message(f"[暖槍] 空槍值超限 第{empty_out_of_range_count}次: {', '.join(out_of_range)}")
-            if empty_out_of_range_count >= 3:
+            threshold = config.measurement.warmup_empty_threshold
+            log_message(f"[暖槍] 空槍值超限 第{empty_out_of_range_count}/{threshold}次: {', '.join(out_of_range)}")
+            if empty_out_of_range_count >= threshold:
                 show_alert(f'暖槍空槍值連續{empty_out_of_range_count}次超限: {", ".join(out_of_range)} {range_txt}', alarm_type="空槍超限")
                 log_message(f"[警報] 暖槍空槍值連續{empty_out_of_range_count}次超出範圍")
                 if plc_manager: plc_manager.set_d513_bit(14, True)
@@ -1350,6 +1352,7 @@ def _refresh_ui_from_config():
     if tolerance_lower_input: tolerance_lower_input.set_value(abs(config.measurement.tolerance_lower))
     if empty_upper_input: empty_upper_input.set_value(config.measurement.empty_upper)
     if empty_lower_input: empty_lower_input.set_value(config.measurement.empty_lower)
+    if warmup_empty_threshold_input: warmup_empty_threshold_input.set_value(config.measurement.warmup_empty_threshold)
     # 「目前設定」面板的顯示 label (主畫面右側)
     if current_settings_labels.get('tol_upper'):
         current_settings_labels['tol_upper'].set_text(f'+{abs(config.measurement.tolerance_upper):.2f}°C')
@@ -1559,6 +1562,7 @@ def _collect_settings_from_ui():
     if tolerance_lower_input: config.measurement.tolerance_lower = abs(float(tolerance_lower_input.value or 0))
     if empty_upper_input: config.measurement.empty_upper = empty_upper_input.value
     if empty_lower_input: config.measurement.empty_lower = empty_lower_input.value
+    if warmup_empty_threshold_input: config.measurement.warmup_empty_threshold = int(warmup_empty_threshold_input.value)
     # 溫度異常設定
     if temp_anomaly_switch: config.measurement.temp_anomaly_enabled = temp_anomaly_switch.value
     if temp_anomaly_upper_input: config.measurement.temp_anomaly_upper = temp_anomaly_upper_input.value
@@ -1918,6 +1922,10 @@ def build_settings_drawer():
                                     ui.label('空槍下限:').classes('text-gray-300 w-28')
                                     empty_lower_input = ui.number(value=config.measurement.empty_lower, format='%.2f', step=0.1).props('outlined dense suffix=°C').classes('w-24') \
                                         .tooltip('空槍量測 (D515) 時可接受的環境/槍體溫度下限。空槍值若低於此會視為空槍量測異常')
+                                with ui.row().classes('items-center'):
+                                    ui.label('暖槍連續次數:').classes('text-gray-300 w-28')
+                                    warmup_empty_threshold_input = ui.number(value=config.measurement.warmup_empty_threshold, format='%d', step=1, min=1).props('outlined dense suffix=次').classes('w-24') \
+                                        .tooltip('暖槍中 (D542=1) 空槍值超限累計達此次數才跳警報（預設 3 次）。中間任一次正常即歸零。非暖槍時任一次超限即跳警報，此設定不影響')
                                 with ui.row().classes('items-center'):
                                     ui.label('判定模式:').classes('text-gray-300 w-28')
                                     ui.toggle({JudgeMode.NORMAL: '正常', JudgeMode.FORCE_OK: '強制OK', JudgeMode.FORCE_NG: '強制NG'}, value=JudgeMode.NORMAL, on_change=on_judge_mode_change).props('dense no-caps') \
