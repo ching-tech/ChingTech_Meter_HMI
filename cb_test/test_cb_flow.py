@@ -15,8 +15,8 @@
 連線後進入互動模式，可輸入指令：
     cd     送出 CD（主動要求量測）
     cb     手動送一次 CB（ACK）
-    cbon   開啟「收到 DB 自動回 CB」(預設開，符合規格)
-    cboff  關閉自動 CB（測試不回 ACK 槍會不會卡住）
+    cbon   開啟「收到 DB 自動回 CB」(符合規格的握手)
+    cboff  關閉自動 CB（預設；純監聽，測槍是否只在壓桿時推送）
     stat   顯示統計（收到 DB 數 / 送出 CB 數）
     q      離開
 
@@ -120,7 +120,7 @@ class CBTester:
         self.mac = mac
         self.sock = None
         self.running = False
-        self.auto_cb = True
+        self.auto_cb = False  # 預設不自動回 CB (純監聽，測槍是否只在壓桿時推送)
         self.recv_buffer = b''
         self.db_count = 0
         self.cb_count = 0
@@ -219,7 +219,8 @@ class CBTester:
         print()
         print("=" * 60)
         print("進入互動模式。指令: cd / cb / cbon / cboff / stat / q")
-        print("現在可以實體按壓耳溫槍，觀察 DB 與自動 CB。")
+        print("※ 預設自動 CB = 關 (純監聽)。先「完全不碰槍」觀察是否仍有 DB，")
+        print("  即可判斷槍是否會閒置自動推送；再實體按壓觀察壓桿觸發。")
         print("=" * 60)
         try:
             while self.running:
