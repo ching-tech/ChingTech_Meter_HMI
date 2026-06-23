@@ -163,6 +163,9 @@ class BluetoothManager:
         # 每個設備的接收 buffer
         self._recv_buffers: Dict[int, bytes] = {}
 
+        # 記錄各通道最近送出 CD 的時間，用於分辨收到的資料是「CD 回應」還是「壓桿主動推送」
+        self._cd_sent_at: Dict[int, float] = {}
+
         # 模擬用：記錄空槍基準值
         self._sim_empty_values: Dict[int, float] = {}
         self._sim_is_empty_measure: bool = True  # 標記下次量測是空槍還是溫度量測
@@ -460,6 +463,9 @@ class BluetoothManager:
         if not device:
             return False
 
+        # 標記送 CD 時間：之後收到的資料若在此時間附近，視為 CD 回應而非壓桿主動推送
+        self._cd_sent_at[channel] = time.time()
+
         if self.simulation_mode:
             # 模擬模式：產生模擬資料（不需要檢查連線狀態）
             self._simulate_measurement(channel)
@@ -476,6 +482,12 @@ class BluetoothManager:
             print(f"發送 CD 指令失敗 ({self._ch_name(channel)}): {e}")
             self._disconnect_device(device)
             return False
+
+    def consume_cd_flag(self, channel: int, window: float = 3.0) -> bool:
+        """取出並清除 CD 標記：若該通道在 window 秒內送過 CD 回傳 True (這筆是 CD 回應)。
+        每收到一筆資料呼叫一次，確保 CD 後的第一筆算 CD 回應，後續壓桿推送算主動。"""
+        ts = self._cd_sent_at.pop(channel, None)
+        return ts is not None and (time.time() - ts) <= window
 
     def request_all_measurements(self) -> int:
         """要求所有設備量測，回傳成功數量"""

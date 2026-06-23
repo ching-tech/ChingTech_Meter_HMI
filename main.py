@@ -65,6 +65,8 @@ is_shutting_down = False
 prev_bt_states = {}
 slave_bt_connecting_since = {}  # Slave 通道進入 CONNECTING 的時間戳 {ch: timestamp}
 _net_data_recv_at = {}  # Master 收到 Slave 各通道「真資料」封包的本機時刻 {ch: master_clock_ts}
+_bt_disconnect_timers = {}  # 藍芽斷線去抖動 {logical_num: (threading.Timer, since_ts)}
+_bt_confirmed_down = set()   # 已確認斷線並回報 PLC 的通道 (logical_num)
 ear_cover_statuses = {}  # 儲存各通道最新的耳套狀態 (1111/0000)
 no_cover_consecutive = {}  # 各通道連續無套計數 {ch: int}
 temp_anomaly_active = False  # 溫度異常狀態
@@ -223,7 +225,8 @@ def on_bluetooth_data(channel: int, data: ThermometerData):
     global ear_cover_statuses
     display_name = get_channel_display_name(channel)
     ear_cover = "有耳溫套" if data.trans_temp_raw == "1111" else "無耳溫套"
-    log_message(f"[BT] {display_name}: {data.temperature}°C ({ear_cover})")
+    source = "CD回應" if bt_manager.consume_cd_flag(channel) else "主動推送"
+    log_message(f"[BT] {display_name}: {data.temperature}°C ({ear_cover}, {source})")
     update_meter_ear_cover(channel, data.trans_temp_raw)
 
     # 儲存耳套狀態供 Log 使用
@@ -254,6 +257,59 @@ def on_bluetooth_data(channel: int, data: ThermometerData):
         )
         net_manager.send_data(packet)
 
+# 藍芽斷線去抖動：藍芽常瞬斷後 1~2 秒自動重連，若立即寫 PLC 斷線異常會讓機台被瞬斷誤觸暫停。
+# 斷線需「持續」此秒數仍未恢復才報給 PLC + 跳警報；期間恢復連線則視為無事。
+_BT_DISCONNECT_DEBOUNCE = 3.0
+
+def _handle_bt_state_change(channel: int, state: ConnectionState, source: str = ""):
+    """統一處理藍芽連線狀態變更 (Master 本機 + Slave 通道共用)。
+    可見性與動作分開：icon 由呼叫端即時更新；瞬斷會即時寫 log，但「跳警報 + 寫 PLC」
+    需斷線持續 _BT_DISCONNECT_DEBOUNCE 秒仍未恢復才執行，避免瞬斷瞬連誤觸機台暫停。
+    source: 顯示用後綴，例如 ' (Slave)'。呼叫前 prev_bt_states[channel] 須已更新為最新狀態。"""
+    display_name = get_channel_display_name(channel)
+    try:
+        logical_num = int(display_name.replace('CH', ''))
+    except ValueError:
+        logical_num = channel
+
+    if state == ConnectionState.CONNECTED:
+        entry = _bt_disconnect_timers.pop(logical_num, None)
+        if entry:
+            entry[0].cancel()
+        if logical_num in _bt_confirmed_down:
+            # 真正長斷線後恢復：解除 PLC 異常 + 停警報
+            _bt_confirmed_down.discard(logical_num)
+            log_message(f"[恢復] {display_name}{source} 藍芽已連線")
+            stop_alert_flash()
+            if plc_manager: plc_manager.set_bt_error(logical_num, False)
+        elif entry:
+            # 觀察期內就恢復 = 瞬斷，未觸發任何異常
+            dur = time.time() - entry[1]
+            log_message(f"[BT] {display_name}{source} 已恢復 (中斷 {dur:.1f}s，未觸發異常)")
+        else:
+            # 初次連線 (開機/啟用)
+            log_message(f"[BT] {display_name}{source} 藍芽已連線")
+    elif state == ConnectionState.CONNECTING:
+        # 連線中：初始連線或重連過程，不視為斷線 (真正斷線由 DISCONNECTED/ERROR 認定)
+        return
+    else:
+        # DISCONNECTED / ERROR
+        if logical_num in _bt_confirmed_down or logical_num in _bt_disconnect_timers:
+            return  # 已回報或已在觀察中，不重複
+        log_message(f"[BT] {display_name}{source} 連線中斷，觀察 {_BT_DISCONNECT_DEBOUNCE:.0f}s…")
+        def _confirm_disconnect():
+            _bt_disconnect_timers.pop(logical_num, None)
+            # 到期時若已恢復連線、或通道已被停用，就不報
+            if prev_bt_states.get(channel) == ConnectionState.CONNECTED or not is_channel_enabled(channel):
+                return
+            _bt_confirmed_down.add(logical_num)
+            log_message(f"[警告] {display_name}{source} 藍芽斷線確認 (持續 {_BT_DISCONNECT_DEBOUNCE:.0f}s)!")
+            show_bt_disconnect_alert(channel)
+            if plc_manager: plc_manager.set_bt_error(logical_num, True)
+        timer = threading.Timer(_BT_DISCONNECT_DEBOUNCE, _confirm_disconnect)
+        _bt_disconnect_timers[logical_num] = (timer, time.time())
+        timer.start()
+
 def on_bluetooth_state(channel: int, state: ConnectionState):
     global prev_bt_states
     update_meter_bt_status(channel, state)
@@ -261,22 +317,7 @@ def on_bluetooth_state(channel: int, state: ConnectionState):
     prev_bt_states[channel] = state
 
     if is_channel_enabled(channel) and state != old_state:
-        display_name = get_channel_display_name(channel)
-        try:
-            logical_num = int(display_name.replace('CH', ''))
-        except:
-            logical_num = channel
-
-        if state in (ConnectionState.DISCONNECTED, ConnectionState.ERROR):
-            log_message(f"[警告] {display_name} 藍芽已斷線!")
-            show_bt_disconnect_alert(channel)
-            if plc_manager: plc_manager.set_bt_error(logical_num, True)
-        elif state == ConnectionState.CONNECTING:
-            if plc_manager: plc_manager.set_bt_error(logical_num, True)
-        elif state == ConnectionState.CONNECTED:
-            log_message(f"[恢復] {display_name} 藍芽已連線")
-            stop_alert_flash()
-            if plc_manager: plc_manager.set_bt_error(logical_num, False)
+        _handle_bt_state_change(channel, state)
 
     # Slave 模式：藍芽狀態變更時通知 Master (失敗時標記待補送)
     if config.network.mode == "slave" and net_manager:
@@ -757,20 +798,7 @@ def on_network_data(packet: MeterDataPacket):
                 slave_bt_connecting_since.pop(ch, None)
 
             if is_channel_enabled(ch) and bt_state != old_state:
-                try:
-                    logical_num = int(display_name.replace('CH', ''))
-                except:
-                    logical_num = ch
-
-                if bt_state in (ConnectionState.DISCONNECTED, ConnectionState.ERROR):
-                    log_message(f"[警告] {display_name} (Slave) 藍芽已斷線!")
-                    show_bt_disconnect_alert(ch)
-                    if plc_manager: plc_manager.set_bt_error(logical_num, True)
-                elif bt_state == ConnectionState.CONNECTED:
-                    log_message(f"[恢復] {display_name} (Slave) 藍芽已連線")
-                    if plc_manager: plc_manager.set_bt_error(logical_num, False)
-                elif bt_state == ConnectionState.CONNECTING:
-                    if plc_manager: plc_manager.set_bt_error(logical_num, True)
+                _handle_bt_state_change(ch, bt_state, source=" (Slave)")
         except ValueError:
             pass
 
@@ -2238,14 +2266,16 @@ def build_ui():
             if is_master: build_meter_block('本機通道 (CH11, 9, 7, 5, 3, 1)', 1, 6, 'blue')
             if not is_master: build_meter_block('本機通道 (CH12, 10, 8, 6, 4, 2)', 7, 12, 'orange')
             with ui.row().classes('flex-grow items-start gap-3 flex-wrap'):
-                with ui.card().classes('bg-slate-800 p-3'):
-                    ui.label('目前設定').classes('text-lg text-white font-bold mb-2')
-                    with ui.row().classes('items-center gap-4'):
-                        ui.label('上限:').classes('text-gray-400 text-base')
-                        current_settings_labels['tol_upper'] = ui.label(f'+{abs(config.measurement.tolerance_upper):.2f}°C').classes('text-green-400 text-xl font-bold')
-                        ui.label('下限:').classes('text-gray-400 text-base')
-                        current_settings_labels['tol_lower'] = ui.label(f'-{abs(config.measurement.tolerance_lower):.2f}°C').classes('text-red-400 text-xl font-bold')
-                    if is_master:
+                # 「目前設定」整張卡片只在 Master 顯示：誤差/空槍上下限的判定都由 Master
+                # 用 Master 本機 config 執行；Slave 不判定，顯示本機值反而會誤導
+                if is_master:
+                    with ui.card().classes('bg-slate-800 p-3'):
+                        ui.label('目前設定').classes('text-lg text-white font-bold mb-2')
+                        with ui.row().classes('items-center gap-4'):
+                            ui.label('上限:').classes('text-gray-400 text-base')
+                            current_settings_labels['tol_upper'] = ui.label(f'+{abs(config.measurement.tolerance_upper):.2f}°C').classes('text-green-400 text-xl font-bold')
+                            ui.label('下限:').classes('text-gray-400 text-base')
+                            current_settings_labels['tol_lower'] = ui.label(f'-{abs(config.measurement.tolerance_lower):.2f}°C').classes('text-red-400 text-xl font-bold')
                         with ui.row().classes('items-center gap-4 mt-1'):
                             ui.label('空槍上限:').classes('text-gray-400 text-base')
                             current_settings_labels['empty_upper'] = ui.label(f'{config.measurement.empty_upper:.1f}°C').classes('text-orange-400 text-xl font-bold')
