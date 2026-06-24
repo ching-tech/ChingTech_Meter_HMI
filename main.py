@@ -65,6 +65,7 @@ is_shutting_down = False
 prev_bt_states = {}
 slave_bt_connecting_since = {}  # Slave 通道進入 CONNECTING 的時間戳 {ch: timestamp}
 _net_data_recv_at = {}  # Master 收到 Slave 各通道「真資料」封包的本機時刻 {ch: master_clock_ts}
+_net_data_value = {}    # Master 收到 Slave 各通道最新「真量測」溫度值 {ch: temp}；排除純狀態封包
 _consumed_ts = {}       # 各通道上一輪已採用的推送時間戳 {ch: ts}；新鮮度基準 (本輪推送須超過此值)
 _manual_trigger = False # 手動擷取旗標：True=本次 D515/D500 來自 UI 手動擷取 (發 CD)，False=生產 (純推送+漏壓偵測)
 _bt_disconnect_timers = {}  # 藍芽斷線去抖動 {logical_num: (threading.Timer, since_ts)}
@@ -676,16 +677,16 @@ def on_reset_button_click():
     """HMI 異常復歸按鈕 — 直接執行復歸邏輯"""
     on_plc_reset()
 
-# --- 量測取值時序常數 ---
+# --- 量測取值說明 ---
 # 量測值由「PLC 壓桿物理接觸」觸發 BT 槍主動 auto-push (cb_test 實測：閒置不推、只壓桿才推)。
-# 生產不發 CD (CD 只回快取值、不觸發新量測、漏壓時會回舊值)；漏壓靠「本輪未收到新推送」偵測。
-# 手動擷取無實體壓桿 → 例外發 CD 取快取值，不做漏壓偵測。
-_PRE_COLLECT_DELAY = 0.3   # 觸發後到開始收集的緩衝 (讓壓桿尾端封包到齊)
+# 生產不發 CD (CD 只回快取值、不觸發新量測、漏壓時會回舊值)；手動擷取無實體壓桿則發 CD。
+# 兩者皆以「本輪未收到新推送」判漏壓 → 統一回報 (D513 bit15 + NG + 警報)。
+# 觸發後到開始收集的延遲由 config.timing.empty_collect_delay / measure_collect_delay 控制 (UI 可調)。
 
 
 def _channel_latest_ts(channel: int) -> float:
-    """通道最新資料的時間戳 (皆為 Master 本機時鐘)。
-    本機 BT 用 last_data.timestamp；Slave 通道用 Master 收到真資料封包的時刻 (_net_data_recv_at)。"""
+    """通道最新「真資料」的時間戳 (皆為 Master 本機時鐘)。
+    本機 BT 用 last_data.timestamp；Slave 用 Master 收到真資料封包時刻 (_net_data_recv_at)。"""
     if bt_manager and channel in bt_manager.devices:
         d = bt_manager.get_last_data(channel)
         if d:
@@ -694,16 +695,13 @@ def _channel_latest_ts(channel: int) -> float:
 
 
 def _channel_latest_value(channel: int):
-    """通道最新一筆溫度值；本機 BT 用 last_data、Slave 用網路收到封包。無資料回 None。"""
+    """通道最新一筆「真量測」溫度值；本機 BT 用 last_data、Slave 用 _net_data_value。無真值回 None。
+    Slave 一律走 _net_data_value (只記真資料封包)，避免純狀態封包 (temp=0) 污染成假 0.0。"""
     if bt_manager and channel in bt_manager.devices:
         d = bt_manager.get_last_data(channel)
         if d:
             return d.temperature
-    if net_manager:
-        pkt = net_manager.get_all_received_data().get(channel)
-        if pkt:
-            return pkt.temperature
-    return None
+    return _net_data_value.get(channel)
 
 
 def _wait_fresh_pushes(enabled: set, timeout: float) -> set:
@@ -735,8 +733,11 @@ def _report_missed(missed: set, is_empty: bool):
 
 
 def _acquire_and_collect(is_empty: bool, is_manual: bool):
-    """生產：純主動推送 + 新鮮度 + timeout 放行 + 漏壓偵測。
-    手動 (UI 手動擷取，無實體壓桿)：發 CD 取快取值，不做漏壓偵測。"""
+    """取值並收集判定。
+    - 手動 (UI 手動擷取，無實體壓桿)：先發 CD + 通知 Slave，讓槍回快取值。
+    - 生產：不發 CD，純等主動推送。
+    之後兩者一致：以新鮮度判斷收齊、timeout 放行；未收到本輪新值的啟用通道即漏壓，
+    統一走 _report_missed (D513 bit15 + NG + 警報)。"""
     label = "空槍" if is_empty else "量測"
     enabled = set(get_enabled_channel_list())
     miss_timeout = config.bluetooth.miss_timeout
@@ -748,13 +749,12 @@ def _acquire_and_collect(is_empty: bool, is_manual: bool):
         for channel in bt_manager.devices.keys():
             if is_channel_enabled(channel):
                 bt_manager.request_measurement(channel)
-        _wait_fresh_pushes(enabled, miss_timeout)  # 等回應到 (best effort)
-        got = set(enabled)   # 手動一律採用現有值 (含快取)，不標漏壓
-        missed = set()
     else:
         log_message(f"[流程] {label}: 等待主動推送 (逾時 {miss_timeout:.1f}s)…")
-        got = _wait_fresh_pushes(enabled, miss_timeout)
-        missed = enabled - got
+
+    # 手動/生產一致：新鮮度判斷收齊，未收到新值者即漏壓
+    got = _wait_fresh_pushes(enabled, miss_timeout)
+    missed = enabled - got
 
     # 更新基準時間戳 (只更新有收到新推送的通道，漏壓通道維持舊基準)
     for ch in got:
@@ -778,8 +778,9 @@ def on_plc_empty_trigger():
     try:
         measure_manager.start_empty_measurement()
         if config.bt_simulation_mode: bt_manager.set_simulation_mode_empty()
-        log_message(f"[流程] 空槍: {_PRE_COLLECT_DELAY}s 後開始收集")
-        threading.Timer(_PRE_COLLECT_DELAY, lambda: trigger_empty_ack_and_collect(is_manual)).start()
+        delay = max(0.0, config.timing.empty_collect_delay)
+        log_message(f"[流程] 空槍: {delay}s 後開始收集")
+        threading.Timer(delay, lambda: trigger_empty_ack_and_collect(is_manual)).start()
     except Exception as e:
         log_message(f"[錯誤] 無法啟動空槍量測: {e}")
         import traceback; traceback.print_exc()
@@ -802,8 +803,9 @@ def on_plc_measure_trigger():
     try:
         measure_manager.start_temperature_measurement()
         if config.bt_simulation_mode: bt_manager.set_simulation_mode_measure()
-        log_message(f"[流程] 量測: {_PRE_COLLECT_DELAY}s 後開始收集")
-        threading.Timer(_PRE_COLLECT_DELAY, lambda: trigger_measure_ack_and_collect(is_manual)).start()
+        delay = max(0.0, config.timing.measure_collect_delay)
+        log_message(f"[流程] 量測: {delay}s 後開始收集")
+        threading.Timer(delay, lambda: trigger_measure_ack_and_collect(is_manual)).start()
     except Exception as e:
         log_message(f"[錯誤] 無法執行溫度量測: {e}")
         import traceback; traceback.print_exc()
@@ -848,8 +850,9 @@ def on_network_data(packet: MeterDataPacket):
     if packet.temperature == 0.0 and not packet.ear_cover:
         log_message(f"[NET] {display_name}: BT {packet.bt_state}")
     else:
-        # 真資料封包：用 Master 本機時鐘記錄收到時刻 (供壓桿資料新鮮度判斷，避免跨機器時鐘偏移)
+        # 真資料封包：記錄收到時刻 (本機時鐘，供新鮮度判斷) 與真量測值 (供取值，避免狀態封包 0.0 污染)
         _net_data_recv_at[ch] = time.time()
+        _net_data_value[ch] = packet.temperature
         ear_txt = "有耳溫套" if packet.ear_cover == "1111" else "無耳溫套" if packet.ear_cover == "0000" else ""
         log_message(f"[NET] {display_name}: {packet.temperature}°C {ear_txt}")
 
