@@ -2300,8 +2300,42 @@ def main_page():
             on_network_state(net_manager.state)
     ui.timer(2.0, sync_network, once=True)
 
+def _enforce_single_instance():
+    """單一實例：啟動時若偵測到前一個同模式實例仍在跑，先 kill 掉 (含其子行程)，只保留本次。
+    避免使用者不知已開、重複執行造成兩個 UI/CMD 與藍芽/PLC 通訊衝突。
+    用 lock 檔記錄 PID；以 mode 區分 (master/slave 各自一個 lock，同台跑兩模式不互殺)。"""
+    import tempfile, subprocess
+    mode = config.network.mode
+    lock_path = os.path.join(tempfile.gettempdir(), f'chingtech_meter_hmi_{mode}.lock')
+    my_pid = os.getpid()
+    old_pid = None
+    try:
+        if os.path.exists(lock_path):
+            old_pid = int((open(lock_path, encoding='utf-8').read().strip() or '0'))
+    except Exception:
+        old_pid = None
+    if old_pid and old_pid != my_pid:
+        try:
+            # 確認該 PID 仍是 python 行程 (避免 PID 被回收後誤殺其他程式)
+            out = subprocess.run(['tasklist', '/FI', f'PID eq {old_pid}', '/FO', 'CSV', '/NH'],
+                                 capture_output=True, text=True, timeout=5).stdout.lower()
+            if 'python' in out:
+                subprocess.run(['taskkill', '/F', '/T', '/PID', str(old_pid)],
+                               capture_output=True, timeout=5)
+                print(f'[single-instance] 已關閉前一個實例 (PID {old_pid})')
+                time.sleep(1.0)   # 等舊實例釋放 port
+        except Exception as e:
+            print(f'[single-instance] 關閉前一實例失敗: {e}')
+    try:
+        with open(lock_path, 'w', encoding='utf-8') as f:
+            f.write(str(my_pid))
+    except Exception:
+        pass
+
+
 if __name__ in {"__main__", "__mp_main__"}:
     if multiprocessing.current_process().name == 'MainProcess':
+        _enforce_single_instance()   # 先關掉前一個實例，再啟動本次
         try:
             import ctypes; app_id = 'chingtech.meter.hmi.v1'
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
