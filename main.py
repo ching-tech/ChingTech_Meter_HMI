@@ -38,6 +38,25 @@ class _TeeWriter:
     def __getattr__(self, name):
         return getattr(self.original, name)
 
+def _read_machine_name_early():
+    """在 config 模組載入前，輕量讀取 config.json 的 machine_name (供 debug log 檔名後綴)。
+    路徑邏輯與 config.py 一致 (程式資料夾外的 ChingTech_Meter_HMI_config)，並支援 --config。"""
+    try:
+        import json
+        cfg_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                "ChingTech_Meter_HMI_config", "config.json")
+        for _i, _a in enumerate(sys.argv):
+            if _a == "--config" and _i + 1 < len(sys.argv):
+                cfg_file = sys.argv[_i + 1]
+        if os.path.exists(cfg_file):
+            with open(cfg_file, encoding='utf-8') as f:
+                name = (json.load(f).get('machine_name') or '').strip()
+                if name:
+                    return name
+    except Exception:
+        pass
+    return 'Machine'
+
 if multiprocessing.current_process().name == 'MainProcess':
     # 優先寫 D:\debug_log；若 D 槽不存在或無權限，fallback 回程式資料夾下 logs/
     _debug_log_dir = r'D:\debug_log'
@@ -47,7 +66,8 @@ if multiprocessing.current_process().name == 'MainProcess':
         _debug_log_dir = 'logs'
         os.makedirs(_debug_log_dir, exist_ok=True)
         print(f'[!] 無法建立 D:\\debug_log ({_e})，debug log fallback 到 {_debug_log_dir}/')
-    _log_filename = os.path.join(_debug_log_dir, f'debug_{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}.txt')
+    _machine = _read_machine_name_early()
+    _log_filename = os.path.join(_debug_log_dir, f'debug_{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}_{_machine}.txt')
     _log_file = open(_log_filename, 'w', encoding='utf-8')
     sys.stdout = _TeeWriter(sys.stdout, _log_file)
     sys.stderr = _TeeWriter(sys.stderr, _log_file)

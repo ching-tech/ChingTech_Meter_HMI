@@ -73,17 +73,27 @@
 - **THEN** 該通道空槍值與量測值皆為 None，系統 SHALL NOT 計算誤差、SHALL NOT 判為 PASS（自然落入 NG）
 
 ### Requirement: Measurement Value Acquisition Mode (取值模式)
-系統 SHALL 以明確的「手動旗標」區分生產模式與手動模式，而非以「是否已有推送」推測。生產模式（真實 PLC 觸發）SHALL 純依主動推送取值並啟用漏壓偵測；手動模式（UI 手動擷取，直接寫 D515/D500、無實體壓桿）SHALL 發送 CD 取得耳溫槍快取值，且 SHALL NOT 套用漏壓偵測。系統 SHALL NOT 在任何流程發送 CB(ACK)。
+系統 SHALL 以明確的「手動旗標」區分生產模式與手動模式，而非以「是否已有推送」推測。差異僅在於「是否發送 CD」：生產模式（真實 PLC 觸發）SHALL NOT 發送 CD，純等主動推送；手動模式（UI 手動擷取，直接寫 D515/D500、無實體壓桿）SHALL 發送 CD 取得耳溫槍快取值。發送 CD 與否之後，兩種模式 SHALL 一致地以新鮮度判斷收齊並執行漏壓偵測（未收到本輪新值的啟用通道即漏壓，統一回報 D513 bit15 + NG + 警報），以確保「未取得值」的通道在兩模式下行為一致。系統 SHALL NOT 在任何流程發送 CB(ACK)。
 
 #### Scenario: Production trigger uses push only
 - **WHEN** 觸發來自真實 PLC（未設手動旗標）
 - **THEN** 系統 SHALL NOT 發送 CD
 - **AND** 系統 SHALL 純依主動推送取值並執行漏壓偵測（即使全部通道皆漏壓，亦不退回手動模式）
 
-#### Scenario: Manual capture uses CD
+#### Scenario: Manual capture uses CD then same miss detection
 - **WHEN** 使用者按下 UI「手動擷取」（設手動旗標後寫 D515/D500）
 - **THEN** 系統 SHALL 對啟用通道發送 CD 取得快取值
-- **AND** 系統 SHALL NOT 套用漏壓偵測
+- **AND** 之後 SHALL 與生產一致地以新鮮度判斷收齊並執行漏壓偵測
+- **AND** 未回應 CD（未收到本輪新值）的通道 SHALL 一律判漏壓並回報（D513 bit15 + NG + 警報），不論本機或 Slave 通道行為一致
+
+#### Scenario: Slave state-only packet not treated as measurement
+- **WHEN** 某 Slave 通道最新收到的是純 BT 狀態封包（temperature=0.0 且無耳套資訊）
+- **THEN** 系統 SHALL NOT 將該 0.0 當作量測值（避免誤觸假空槍異常）
+- **AND** 該通道於本輪若無真量測新值 SHALL 判為漏壓
+
+#### Scenario: Collect delay is configurable
+- **WHEN** 使用者於進階設定調整「空槍/溫度收集延遲」
+- **THEN** D515/D500 觸發後到開始收集的延遲 SHALL 採用 `config.timing.empty_collect_delay` / `measure_collect_delay`（設 0 即無延遲）
 
 #### Scenario: CB never sent
 - **WHEN** 系統收到任何 DB 量測資料封包
