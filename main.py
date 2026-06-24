@@ -68,7 +68,7 @@ _net_data_recv_at = {}  # Master 收到 Slave 各通道「真資料」封包的�
 _consumed_ts = {}       # 各通道上一輪已採用的推送時間戳 {ch: ts}；新鮮度基準 (本輪推送須超過此值)
 _manual_trigger = False # 手動擷取旗標：True=本次 D515/D500 來自 UI 手動擷取 (發 CD)，False=生產 (純推送+漏壓偵測)
 _bt_disconnect_timers = {}  # 藍芽斷線去抖動 {logical_num: (threading.Timer, since_ts)}
-_bt_confirmed_down = set()   # 已確認斷線並回報 PLC 的通道 (logical_num)
+_bt_confirmed_down = {}      # 已確認斷線並回報 PLC 的通道 {logical_num: 上次「仍斷線」提醒時刻}
 ear_cover_statuses = {}  # 儲存各通道最新的耳套狀態 (1111/0000)
 no_cover_consecutive = {}  # 各通道連續無套計數 {ch: int}
 temp_anomaly_active = False  # 溫度異常狀態
@@ -262,6 +262,7 @@ def on_bluetooth_data(channel: int, data: ThermometerData):
 # 藍芽斷線去抖動：藍芽常瞬斷後 1~2 秒自動重連，若立即寫 PLC 斷線異常會讓機台被瞬斷誤觸暫停。
 # 斷線需「持續」此秒數仍未恢復才報給 PLC + 跳警報；期間恢復連線則視為無事。
 _BT_DISCONNECT_DEBOUNCE = 3.0
+_BT_DISCONNECT_REMIND = 30.0   # 確認斷線後，每隔此秒數 log 一次「仍斷線」提醒
 
 def _handle_bt_state_change(channel: int, state: ConnectionState, source: str = ""):
     """統一處理藍芽連線狀態變更 (Master 本機 + Slave 通道共用)。
@@ -280,7 +281,7 @@ def _handle_bt_state_change(channel: int, state: ConnectionState, source: str = 
             entry[0].cancel()
         if logical_num in _bt_confirmed_down:
             # 真正長斷線後恢復：解除 PLC 異常 + 停警報
-            _bt_confirmed_down.discard(logical_num)
+            _bt_confirmed_down.pop(logical_num, None)
             log_message(f"[恢復] {display_name}{source} 藍芽已連線")
             stop_alert_flash()
             if plc_manager: plc_manager.set_bt_error(logical_num, False)
@@ -304,7 +305,7 @@ def _handle_bt_state_change(channel: int, state: ConnectionState, source: str = 
             # 到期時若已恢復連線、或通道已被停用，就不報
             if prev_bt_states.get(channel) == ConnectionState.CONNECTED or not is_channel_enabled(channel):
                 return
-            _bt_confirmed_down.add(logical_num)
+            _bt_confirmed_down[logical_num] = time.time()
             log_message(f"[警告] {display_name}{source} 藍芽斷線確認 (持續 {_BT_DISCONNECT_DEBOUNCE:.0f}s)!")
             show_bt_disconnect_alert(channel)
             if plc_manager: plc_manager.set_bt_error(logical_num, True)
@@ -638,6 +639,14 @@ def on_plc_reset():
     if plc_manager:
         plc_manager.clear_d513()
         log_message("[PLC] D513 已清除 (0x0000)")
+        # 清 0 後，對「仍斷線」的通道重新寫回 bt_error：藍芽是持續性硬體狀態，
+        # 復歸不該讓還在斷線的槍被忽略 (溫度/無套/空槍/漏壓等是逐次條件，下輪會重評，故不重寫)
+        if _bt_confirmed_down:
+            now = time.time()
+            for logical in list(_bt_confirmed_down.keys()):
+                plc_manager.set_bt_error(logical, True)
+                _bt_confirmed_down[logical] = now   # 重置「仍斷線」提醒計時
+            log_message(f"[PLC] 復歸後重寫仍斷線通道 D513: CH{sorted(_bt_confirmed_down.keys())}")
 
     # 清除所有異常狀態
     temp_anomaly_active = False
@@ -1703,6 +1712,14 @@ def update_plc_display():
         system_status_label.set_text('運行中' if is_run else '已停止')
         system_status_label.classes('text-green-400' if is_run else 'text-red-400', 
                                     remove='text-green-400 text-red-400')
+
+    # 斷線持續提醒：已確認斷線的通道每 _BT_DISCONNECT_REMIND 秒 log 一次 (Master/Slave 皆執行)
+    if _bt_confirmed_down:
+        _now = time.time()
+        for _ln, _last in list(_bt_confirmed_down.items()):
+            if _now - _last >= _BT_DISCONNECT_REMIND:
+                _bt_confirmed_down[_ln] = _now
+                log_message(f"[警告] CH{_ln} 藍芽仍斷線 (持續中)")
 
     if not plc_mgr or not bt_mgr: return
     if plc_status_icon:
