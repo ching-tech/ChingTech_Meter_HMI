@@ -479,10 +479,12 @@ def write_alarm_log(message: str, alarm_type: str = "其他"):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     safe_message = message.replace('"', '""')
     line = f'{timestamp},{alarm_type},"{safe_message}"\n'
+    safe_machine = (config.machine_name or "Machine").strip() or "Machine"
+    machine_suffix = f"_{safe_machine}"
 
-    # 本機寫入 (同步)：跟 cycle log 共用 config.log_dir，放在 Alarm 子資料夾
+    # 本機寫入 (同步)：跟 cycle log 共用 config.log_dir，放在 Alarm 子資料夾；檔名加機台後綴 (與遠端一致)
     try:
-        _write_alarm_line(os.path.join(config.log_dir, "Alarm"), today, line)
+        _write_alarm_line(os.path.join(config.log_dir, "Alarm"), today, line, machine_suffix=machine_suffix)
     except Exception as e:
         err = f"[!] 寫入本機 Alarm Log 失敗: {e}"
         print(err)
@@ -491,12 +493,11 @@ def write_alarm_log(message: str, alarm_type: str = "其他"):
 
     # 遠端寫入：丟進佇列由 daemon worker 處理，呼叫端不阻塞
     if config.remote_alarm_dir:
-        safe_machine = (config.machine_name or "Machine").strip() or "Machine"
         _alarm_remote_queue.put((
             config.remote_alarm_dir,
             today,
             line,
-            f"_{safe_machine}",
+            machine_suffix,
             0,  # attempt 計數
         ))
 
