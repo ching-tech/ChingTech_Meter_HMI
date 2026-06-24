@@ -13,6 +13,13 @@ from enum import Enum
 D_BASE = 500        # 起始暫存器
 D_READ_SIZE = 43    # 批次讀取數量 (D500~D542)
 
+def _to_signed16(v: int) -> int:
+    """0~65535 無號 16-bit → -32768~32767 有號值。
+    pymcprotocol.batchwrite_wordunits 以 signed 打包 (isSigned=True)，bit15=0x8000=32768
+    會 OverflowError 導致整筆寫入失敗 (例如 D513 bit15 漏壓旗標)。先轉有號即可正確寫入。"""
+    v &= 0xFFFF
+    return v - 0x10000 if v >= 0x8000 else v
+
 # 各暫存器偏移 (相對於 D_BASE)
 _OFF_TRIGGER       = 0   # D500: 量測觸發
 _OFF_RESULT_START  = 1   # D501~D512: 槍 1~12 判定
@@ -309,7 +316,7 @@ class PLCManager:
             return True
 
         try:
-            self._locked_write(f"D{D_BASE + _OFF_BT_ERROR}", [self._bt_error_mask])
+            self._locked_write(f"D{D_BASE + _OFF_BT_ERROR}", [_to_signed16(self._bt_error_mask)])
             return True
         except Exception as e:
             print(f"寫入藍芽狀態失敗: {e}")
@@ -351,7 +358,7 @@ class PLCManager:
             return True
 
         try:
-            self._locked_write(f"D{D_BASE + _OFF_BT_ERROR}", [self._bt_error_mask])
+            self._locked_write(f"D{D_BASE + _OFF_BT_ERROR}", [_to_signed16(self._bt_error_mask)])
             return True
         except Exception as e:
             print(f"寫入 D513 失敗: {e}")
