@@ -251,9 +251,10 @@ class MeasurementManager:
         ch.measure_value = value
         ch.timestamp = time.time()
 
-        # 計算誤差並判斷
+        # 計算誤差並判斷；round 到 2 位避免浮點誤差讓邊界判錯邊，
+        # 並確保「判定值 = 儲存值 = log 上 2 位數值算得出的誤差」一致 (log 會人工核對)
         if ch.empty_value is not None:
-            ch.error_value = value - ch.empty_value
+            ch.error_value = round(value - ch.empty_value, 2)
             ch.result = self._judge(ch.error_value)
 
         self._notify_channel_update(channel)
@@ -275,7 +276,7 @@ class MeasurementManager:
             ch.timestamp = time.time()
 
             if ch.empty_value is not None:
-                ch.error_value = value - ch.empty_value
+                ch.error_value = round(value - ch.empty_value, 2)   # 2 位，與 log/顯示一致，避免邊界浮點誤判
                 ch.result = self._judge(ch.error_value)
                 print(f"[measurement] CH{channel}: empty={ch.empty_value:.2f}, measure={value:.2f}, error={ch.error_value:.2f}, result={ch.result.value}")
             else:

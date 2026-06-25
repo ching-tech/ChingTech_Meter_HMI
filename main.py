@@ -556,7 +556,7 @@ def check_temp_anomaly_all(values: dict):
     if anomaly_list:
         if plc_manager:
             plc_manager.set_d513_bit(12, True)
-        range_txt = f'(範圍: {config.measurement.temp_anomaly_lower}~{config.measurement.temp_anomaly_upper}°C)'
+        range_txt = f'(範圍: {config.measurement.temp_anomaly_lower:.2f}~{config.measurement.temp_anomaly_upper:.2f}°C)'
         log_message(f"[異常] 溫度異常: {', '.join(anomaly_list)} {range_txt}")
         show_alert(f'量測溫度異常: {", ".join(anomaly_list)} {range_txt}', alarm_type="溫度異常")
         temp_anomaly_active = True
@@ -1254,7 +1254,7 @@ def collect_empty_values(got: set, missed: set):
         else:
             set_meter_highlight(ch, False)
 
-    range_txt = f'(範圍: {config.measurement.empty_lower:.1f}~{config.measurement.empty_upper:.1f}°C)'
+    range_txt = f'(範圍: {config.measurement.empty_lower:.2f}~{config.measurement.empty_upper:.2f}°C)'
 
     if out_of_range:
         if is_warmup:
@@ -1366,9 +1366,9 @@ def _refresh_ui_from_config():
     if current_settings_labels.get('tol_lower'):
         current_settings_labels['tol_lower'].set_text(f'-{abs(config.measurement.tolerance_lower):.2f}°C')
     if current_settings_labels.get('empty_upper'):
-        current_settings_labels['empty_upper'].set_text(f'{config.measurement.empty_upper:.1f}°C')
+        current_settings_labels['empty_upper'].set_text(f'{config.measurement.empty_upper:.2f}°C')
     if current_settings_labels.get('empty_lower'):
-        current_settings_labels['empty_lower'].set_text(f'{config.measurement.empty_lower:.1f}°C')
+        current_settings_labels['empty_lower'].set_text(f'{config.measurement.empty_lower:.2f}°C')
     # 頂部 banner 的「溫度異常 / 連續無套」使用狀態
     if temp_anomaly_status_label is not None:
         on = config.measurement.temp_anomaly_enabled
@@ -1938,11 +1938,11 @@ def build_settings_drawer():
                                         .tooltip('量測誤差容許下限（正值，系統會自動加負號）。量測值低於基準值此範圍以內視為 PASS；超過判 NG')
                                 with ui.row().classes('items-center'):
                                     ui.label('空槍上限:').classes('text-gray-300 w-28')
-                                    empty_upper_input = ui.number(value=config.measurement.empty_upper, format='%.2f', step=0.1).props('outlined dense suffix=°C').classes('w-24') \
+                                    empty_upper_input = ui.number(value=config.measurement.empty_upper, format='%.2f', step=0.01).props('outlined dense suffix=°C').classes('w-24') \
                                         .tooltip('空槍量測 (D515) 時可接受的環境/槍體溫度上限。空槍值若高於此會視為空槍量測異常')
                                 with ui.row().classes('items-center'):
                                     ui.label('空槍下限:').classes('text-gray-300 w-28')
-                                    empty_lower_input = ui.number(value=config.measurement.empty_lower, format='%.2f', step=0.1).props('outlined dense suffix=°C').classes('w-24') \
+                                    empty_lower_input = ui.number(value=config.measurement.empty_lower, format='%.2f', step=0.01).props('outlined dense suffix=°C').classes('w-24') \
                                         .tooltip('空槍量測 (D515) 時可接受的環境/槍體溫度下限。空槍值若低於此會視為空槍量測異常')
                                 with ui.row().classes('items-center'):
                                     ui.label('暖槍連續次數:').classes('text-gray-300 w-28')
@@ -1963,11 +1963,11 @@ def build_settings_drawer():
                                     ta_fields.set_visibility(config.measurement.temp_anomaly_enabled)
                                     with ui.row().classes('items-center'):
                                         ui.label('溫度上限:').classes('text-gray-300 w-28')
-                                        temp_anomaly_upper_input = ui.number(value=config.measurement.temp_anomaly_upper, format='%.1f', step=0.1).props('outlined dense suffix=°C').classes('w-24') \
+                                        temp_anomaly_upper_input = ui.number(value=config.measurement.temp_anomaly_upper, format='%.2f', step=0.01).props('outlined dense suffix=°C').classes('w-24') \
                                             .tooltip('溫度異常檢查的上限值。量測值高於此即觸發警報（預設 42°C，正常人體溫不會超過此值）')
                                     with ui.row().classes('items-center'):
                                         ui.label('溫度下限:').classes('text-gray-300 w-28')
-                                        temp_anomaly_lower_input = ui.number(value=config.measurement.temp_anomaly_lower, format='%.1f', step=0.1).props('outlined dense suffix=°C').classes('w-24') \
+                                        temp_anomaly_lower_input = ui.number(value=config.measurement.temp_anomaly_lower, format='%.2f', step=0.01).props('outlined dense suffix=°C').classes('w-24') \
                                             .tooltip('溫度異常檢查的下限值。量測值低於此即觸發警報（預設 30°C，低於此可能是耳溫槍故障或沒對到耳朵）')
                                 # --- 連續無套異常設定 ---
                                 ui.separator().classes('my-1')
@@ -2276,9 +2276,9 @@ def build_ui():
                             current_settings_labels['tol_lower'] = ui.label(f'-{abs(config.measurement.tolerance_lower):.2f}°C').classes('text-red-400 text-xl font-bold')
                         with ui.row().classes('items-center gap-4 mt-1'):
                             ui.label('空槍上限:').classes('text-gray-400 text-base')
-                            current_settings_labels['empty_upper'] = ui.label(f'{config.measurement.empty_upper:.1f}°C').classes('text-orange-400 text-xl font-bold')
+                            current_settings_labels['empty_upper'] = ui.label(f'{config.measurement.empty_upper:.2f}°C').classes('text-orange-400 text-xl font-bold')
                             ui.label('空槍下限:').classes('text-gray-400 text-base')
-                            current_settings_labels['empty_lower'] = ui.label(f'{config.measurement.empty_lower:.1f}°C').classes('text-cyan-400 text-xl font-bold')
+                            current_settings_labels['empty_lower'] = ui.label(f'{config.measurement.empty_lower:.2f}°C').classes('text-cyan-400 text-xl font-bold')
                 if is_master:
                     with ui.card().classes('bg-slate-700 p-3'):
                         ui.label('手動觸發').classes('text-lg text-yellow-400 font-bold mb-2')
