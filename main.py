@@ -244,6 +244,14 @@ def is_channel_enabled(channel: int) -> bool:
         return config.measurement.channel_enabled[channel - 1]
     return False
 
+def _is_logical_channel_enabled(logical_num: int) -> bool:
+    """logical_num = 顯示通道號 (CHx)；找出對應內部通道判斷是否啟用
+    (_bt_confirmed_down / D513 bit 以 logical 編號，is_channel_enabled 以內部編號)。"""
+    for internal, name in CHANNEL_DISPLAY_NAMES.items():
+        if name == f'CH{logical_num}':
+            return is_channel_enabled(internal)
+    return is_channel_enabled(logical_num)
+
 def on_bluetooth_data(channel: int, data: ThermometerData):
     global ear_cover_statuses
     display_name = get_channel_display_name(channel)
@@ -661,14 +669,21 @@ def on_plc_reset():
     if plc_manager:
         plc_manager.clear_d513()
         log_message("[PLC] D513 已清除 (0x0000)")
-        # 清 0 後，對「仍斷線」的通道重新寫回 bt_error：藍芽是持續性硬體狀態，
-        # 復歸不該讓還在斷線的槍被忽略 (溫度/無套/空槍/漏壓等是逐次條件，下輪會重評，故不重寫)
+        # 清 0 後，對「仍斷線且仍啟用」的通道重新寫回 bt_error：藍芽是持續性硬體狀態，
+        # 復歸不該讓還在斷線的槍被忽略 (溫度/無套/空槍/漏壓等是逐次條件，下輪會重評，故不重寫)。
+        # 已停用的通道不重寫、並從追蹤移除，避免停用後復歸又把它的 bit 點亮造成停機。
         if _bt_confirmed_down:
             now = time.time()
+            reasserted = []
             for logical in list(_bt_confirmed_down.keys()):
+                if not _is_logical_channel_enabled(logical):
+                    _bt_confirmed_down.pop(logical, None)
+                    continue
                 plc_manager.set_bt_error(logical, True)
                 _bt_confirmed_down[logical] = now   # 重置「仍斷線」提醒計時
-            log_message(f"[PLC] 復歸後重寫仍斷線通道 D513: CH{sorted(_bt_confirmed_down.keys())}")
+                reasserted.append(logical)
+            if reasserted:
+                log_message(f"[PLC] 復歸後重寫仍斷線通道 D513: CH{sorted(reasserted)}")
 
     # 清除所有異常狀態
     temp_anomaly_active = False
@@ -1334,21 +1349,35 @@ def collect_measure_values(got: set, missed: set):
 
     update_plc_display()
 
+def _on_channel_toggle(ch: int, enabled: bool):
+    """通道啟用開關切換即時生效：更新 config、存檔、刷新顯示 (含清 D513/斷線追蹤)、同步對端。
+    停用後 bt_manager 下個迴圈即跳過該通道不再連線；該通道 D513 bit 立即清除。"""
+    if 1 <= ch <= 12:
+        config.measurement.channel_enabled[ch - 1] = bool(enabled)
+    save_config(config)
+    update_channel_disabled_display()
+    _sync_channel_enabled_to_peer()
+    log_message(f"[設定] {get_channel_display_name(ch)} 已{'啟用' if enabled else '停用'}")
+
 def update_channel_disabled_display():
     for ch, meter in meters_ui.items():
         enabled = is_channel_enabled(ch)
         meter['disabled_badge'].set_visibility(not enabled)
         if enabled: meter['row_container'].classes(remove='opacity-40')
         else: meter['row_container'].classes('opacity-40')
-    # 清除停用通道的 D513 錯誤位元
-    if plc_manager:
-        for ch in range(1, 13):
-            if not is_channel_enabled(ch):
-                try:
-                    logical_num = int(get_channel_display_name(ch).replace('CH', ''))
-                except:
-                    logical_num = ch
-                plc_manager.set_bt_error(logical_num, False)
+    # 停用通道：清掉斷線追蹤與 D513 錯誤位元，避免「仍斷線」提醒/異常復歸又把它重寫 ON
+    for ch in range(1, 13):
+        if not is_channel_enabled(ch):
+            try:
+                logical_num = int(get_channel_display_name(ch).replace('CH', ''))
+            except:
+                logical_num = ch
+            _bt_confirmed_down.pop(logical_num, None)        # 不再追蹤 (提醒/復歸不再碰)
+            t = _bt_disconnect_timers.pop(logical_num, None)  # 取消待確認的斷線計時
+            if t:
+                t[0].cancel()
+            if plc_manager:
+                plc_manager.set_bt_error(logical_num, False)  # 清 D513 該 bit
 
 def _refresh_ui_from_config():
     """從 config 刷新所有設定面板 UI 元件的顯示值"""
@@ -2091,8 +2120,9 @@ def build_settings_drawer():
                         for i in ch_range:
                             with ui.column().classes('items-center'):
                                 ui.label(get_channel_display_name(i)).classes('text-gray-300 text-[10px]')
-                                channel_switches[i] = ui.switch(value=config.measurement.channel_enabled[i-1]).props('dense') \
-                                    .tooltip(f'啟用 {get_channel_display_name(i)}。停用後該通道不參與量測判定，外觀變灰')
+                                channel_switches[i] = ui.switch(value=config.measurement.channel_enabled[i-1],
+                                    on_change=lambda e, ch=i: _on_channel_toggle(ch, e.value)).props('dense') \
+                                    .tooltip(f'啟用 {get_channel_display_name(i)}。切換即時生效：停用後立即停止連線、清除該通道 D513 異常，不需按更新')
                 ui.button('儲存進階設定', on_click=on_save_advanced_settings).props('color=blue icon=save').classes('w-full mt-4') \
                     .tooltip('儲存目前所有設定到 config.json；模擬模式或 IP 變更等需重啟才會完全生效')
                 ui.button('更新資料 (即時套用)', on_click=on_apply_settings).props('color=green icon=sync').classes('w-full mt-2') \
