@@ -1369,6 +1369,10 @@ def _refresh_ui_from_config():
         current_settings_labels['empty_upper'].set_text(f'{config.measurement.empty_upper:.2f}°C')
     if current_settings_labels.get('empty_lower'):
         current_settings_labels['empty_lower'].set_text(f'{config.measurement.empty_lower:.2f}°C')
+    if current_settings_labels.get('temp_upper'):
+        current_settings_labels['temp_upper'].set_text(f'{config.measurement.temp_anomaly_upper:.2f}°C')
+    if current_settings_labels.get('temp_lower'):
+        current_settings_labels['temp_lower'].set_text(f'{config.measurement.temp_anomaly_lower:.2f}°C')
     # 頂部 banner 的「溫度異常 / 連續無套」使用狀態
     if temp_anomaly_status_label is not None:
         on = config.measurement.temp_anomaly_enabled
@@ -1945,7 +1949,7 @@ def build_settings_drawer():
                                     empty_lower_input = ui.number(value=config.measurement.empty_lower, format='%.2f', step=0.01).props('outlined dense suffix=°C').classes('w-24') \
                                         .tooltip('空槍量測 (D515) 時可接受的環境/槍體溫度下限。空槍值若低於此會視為空槍量測異常')
                                 with ui.row().classes('items-center'):
-                                    ui.label('暖槍連續次數:').classes('text-gray-300 w-28')
+                                    ui.label('暖槍連續異常次數:').classes('text-gray-300 w-36')
                                     warmup_empty_threshold_input = ui.number(value=config.measurement.warmup_empty_threshold, format='%d', step=1, min=1).props('outlined dense suffix=次').classes('w-24') \
                                         .tooltip('暖槍中 (D542=1) 空槍值超限累計達此次數才跳警報（預設 3 次）。中間任一次正常即歸零。非暖槍時任一次超限即跳警報，此設定不影響')
                                 with ui.row().classes('items-center'):
@@ -2263,29 +2267,38 @@ def build_ui():
             if is_master: build_meter_block('Slave 通道 (CH12, 10, 8, 6, 4, 2)', 7, 12, 'orange')
             if is_master: build_meter_block('本機通道 (CH11, 9, 7, 5, 3, 1)', 1, 6, 'blue')
             if not is_master: build_meter_block('本機通道 (CH12, 10, 8, 6, 4, 2)', 7, 12, 'orange')
-            with ui.row().classes('flex-grow items-start gap-3 flex-wrap'):
-                # 「目前設定」整張卡片只在 Master 顯示：誤差/空槍上下限的判定都由 Master
-                # 用 Master 本機 config 執行；Slave 不判定，顯示本機值反而會誤導
-                if is_master:
+            # 右側：目前設定在上、手動觸發在下 (整欄只在 Master 顯示)；不撐開，維持內容寬度避免擠掉版面
+            if is_master:
+                with ui.column().classes('items-start gap-3'):
+                    # 「目前設定」單欄、一項一列 (最窄)
                     with ui.card().classes('bg-slate-800 p-3'):
                         ui.label('目前設定').classes('text-lg text-white font-bold mb-2')
-                        with ui.row().classes('items-center gap-4'):
-                            ui.label('上限:').classes('text-gray-400 text-base')
-                            current_settings_labels['tol_upper'] = ui.label(f'+{abs(config.measurement.tolerance_upper):.2f}°C').classes('text-green-400 text-xl font-bold')
-                            ui.label('下限:').classes('text-gray-400 text-base')
-                            current_settings_labels['tol_lower'] = ui.label(f'-{abs(config.measurement.tolerance_lower):.2f}°C').classes('text-red-400 text-xl font-bold')
-                        with ui.row().classes('items-center gap-4 mt-1'):
-                            ui.label('空槍上限:').classes('text-gray-400 text-base')
-                            current_settings_labels['empty_upper'] = ui.label(f'{config.measurement.empty_upper:.2f}°C').classes('text-orange-400 text-xl font-bold')
-                            ui.label('空槍下限:').classes('text-gray-400 text-base')
-                            current_settings_labels['empty_lower'] = ui.label(f'{config.measurement.empty_lower:.2f}°C').classes('text-cyan-400 text-xl font-bold')
-                if is_master:
+                        with ui.column().classes('gap-1'):
+                            with ui.row().classes('items-center gap-2'):
+                                ui.label('上限:').classes('text-gray-400 text-base w-24')
+                                current_settings_labels['tol_upper'] = ui.label(f'+{abs(config.measurement.tolerance_upper):.2f}°C').classes('text-green-400 text-xl font-bold')
+                            with ui.row().classes('items-center gap-2'):
+                                ui.label('下限:').classes('text-gray-400 text-base w-24')
+                                current_settings_labels['tol_lower'] = ui.label(f'-{abs(config.measurement.tolerance_lower):.2f}°C').classes('text-red-400 text-xl font-bold')
+                            with ui.row().classes('items-center gap-2'):
+                                ui.label('空槍上限:').classes('text-gray-400 text-base w-24')
+                                current_settings_labels['empty_upper'] = ui.label(f'{config.measurement.empty_upper:.2f}°C').classes('text-orange-400 text-xl font-bold')
+                            with ui.row().classes('items-center gap-2'):
+                                ui.label('空槍下限:').classes('text-gray-400 text-base w-24')
+                                current_settings_labels['empty_lower'] = ui.label(f'{config.measurement.empty_lower:.2f}°C').classes('text-cyan-400 text-xl font-bold')
+                            with ui.row().classes('items-center gap-2'):
+                                ui.label('溫度上限:').classes('text-gray-400 text-base w-24')
+                                current_settings_labels['temp_upper'] = ui.label(f'{config.measurement.temp_anomaly_upper:.2f}°C').classes('text-amber-400 text-xl font-bold')
+                            with ui.row().classes('items-center gap-2'):
+                                ui.label('溫度下限:').classes('text-gray-400 text-base w-24')
+                                current_settings_labels['temp_lower'] = ui.label(f'{config.measurement.temp_anomaly_lower:.2f}°C').classes('text-sky-400 text-xl font-bold')
+                    # 手動觸發 (移到目前設定下方)
                     with ui.card().classes('bg-slate-700 p-3'):
                         ui.label('手動觸發').classes('text-lg text-yellow-400 font-bold mb-2')
-                        with ui.row().classes('gap-2'):
-                            ui.button('空槍量測', on_click=on_simulate_empty).props('color=cyan icon=science size=lg') \
+                        with ui.column().classes('gap-2'):
+                            ui.button('空槍量測', on_click=on_simulate_empty).props('color=cyan icon=science size=lg').classes('w-full') \
                                 .tooltip('模擬 PLC 寫入 D515=1，啟動空槍量測流程；用於模擬模式或 PLC 未接時測試')
-                            ui.button('溫度量測', on_click=on_simulate_measure).props('color=orange icon=thermostat size=lg') \
+                            ui.button('溫度量測', on_click=on_simulate_measure).props('color=orange icon=thermostat size=lg').classes('w-full') \
                                 .tooltip('模擬 PLC 寫入 D500=1，啟動溫度量測流程；用於模擬模式或 PLC 未接時測試')
         with ui.row().classes('w-full items-stretch gap-3'):
             if is_master:
