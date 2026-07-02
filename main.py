@@ -154,6 +154,8 @@ measure_manager = None
 # --- UI 狀態元件 ---
 plc_status_icon = None
 network_status_icon = None
+slave_conn_status_label = None   # 「Slave 連線異常」紅字 (Master 專屬)
+_slave_conn_alert_shown = False  # 邊緣偵測：是否已記錄過本次 Slave 連線異常
 system_status_label = None  
 measure_status_label = None 
 batch_no_input = None       # 批號輸入框
@@ -994,6 +996,33 @@ def on_network_data(packet: MeterDataPacket):
         ear_txt = "有耳溫套" if packet.ear_cover == "1111" else "無耳溫套" if packet.ear_cover == "0000" else ""
         log_message(f"[NET] {display_name}: {packet.temperature}°C {ear_txt}")
 
+def _any_slave_channel_enabled() -> bool:
+    """是否有任一 Slave 通道 (內部 7~12 = 顯示 CH12,10,8,6,4,2) 啟用。"""
+    return any(is_channel_enabled(ch) for ch in range(7, 13))
+
+def _update_slave_conn_alert():
+    """更新「Slave 連線異常」顯示：Master 模式 + Slave 未連上 + 有 Slave 通道啟用才顯示。
+    全 Slave 通道停用時不顯示 (不需 Slave)。連上或全停用即自動消失。"""
+    global _slave_conn_alert_shown
+    is_master = config.network.mode == "master"
+    connected = bool(net_manager and net_manager.state == NetworkState.CONNECTED)
+    should_show = is_master and (not connected) and _any_slave_channel_enabled()
+
+    if slave_conn_status_label is not None:
+        try:
+            with slave_conn_status_label.client:
+                slave_conn_status_label.set_visibility(should_show)
+        except Exception:
+            pass
+
+    # 邊緣：進入異常時記一次 log/alarm，恢復時記一次
+    if should_show and not _slave_conn_alert_shown:
+        log_message("[警告] Slave 連線異常 (Slave 未連上 Master)")
+        write_alarm_log("Slave 連線異常", alarm_type="網路異常")
+    elif (not should_show) and _slave_conn_alert_shown:
+        log_message("[恢復] Slave 連線異常已解除")
+    _slave_conn_alert_shown = should_show
+
 def on_network_state(state: NetworkState):
     global prev_net_state
     if network_status_icon:
@@ -1006,10 +1035,12 @@ def on_network_state(state: NetworkState):
         old = prev_net_state
         prev_net_state = state
         if state in (NetworkState.DISCONNECTED, NetworkState.ERROR):
-            log_message(f"[警告] 網路連線異常 ({state.value})")
-            show_alert(f'網路連線異常 ({state.value})', alarm_type="網路異常")
+            log_message(f"[NET] 網路連線中斷 ({state.value})")
         elif state == NetworkState.CONNECTED and old is not None:
             log_message("[恢復] 網路連線已恢復")
+
+    # Slave 連線異常顯示 (Master 專屬，全 Slave 通道停用時不顯示)
+    _update_slave_conn_alert()
 
     # Master 模式：連線建立後，延遲請求 Slave 重送藍芽狀態 + 同步通道啟用狀態
     if state == NetworkState.CONNECTED and config.network.mode == "master" and net_manager:
@@ -1480,6 +1511,8 @@ def update_channel_disabled_display():
                 t[0].cancel()
             if plc_manager:
                 plc_manager.set_bt_error(logical_num, False)  # 清 D513 該 bit
+    # 通道啟用狀態變更後，重評 Slave 連線異常顯示 (全 Slave 停用時不顯示)
+    _update_slave_conn_alert()
 
 def _refresh_ui_from_config():
     """從 config 刷新所有設定面板 UI 元件的顯示值"""
@@ -2266,7 +2299,7 @@ def build_meter_block(title: str, start_ch: int, end_ch: int, border_color: str 
             meters_ui[i] = {'row_container': row_container, 'disabled_badge': disabled_badge, 'bt_icon': bt_icon, 'ear_cover': ear_cover_label, 'empty_display': empty_display, 'temp_display': temp_display, 'error_display': error_display, 'light': status_light, 'text': status_text, 'ok_display': ok_display, 'ng_display': ng_display, 'no_cover_count': no_cover_count_label}
 
 def build_ui():
-    global meters_ui, log_console, plc_status_icon, network_status_icon, alert_container, alert_message_label, system_status_label, measure_status_label, plc_monitor_ui, batch_no_input, total_ok_label, total_ng_label, temp_anomaly_status_label, no_cover_anomaly_status_label, plc_alert_container, plc_alert_label
+    global meters_ui, log_console, plc_status_icon, network_status_icon, alert_container, alert_message_label, system_status_label, measure_status_label, plc_monitor_ui, batch_no_input, total_ok_label, total_ng_label, temp_anomaly_status_label, no_cover_anomaly_status_label, plc_alert_container, plc_alert_label, slave_conn_status_label
     is_master = config.network.mode == "master"
     ui.colors(primary='#5898d4', secondary='#26a69a', accent='#9c27b0', dark='#1d1d1d')
     ui.add_head_html('<style>'
@@ -2321,6 +2354,8 @@ def build_ui():
                         with ui.row().classes('items-center gap-2'):
                             ui.label('網路:').classes('text-gray-300 text-xl')
                             network_status_icon = ui.icon('circle', color='gray').classes('text-2xl')
+                            slave_conn_status_label = ui.label('Slave 連線異常').classes('text-red-400 text-lg font-bold')
+                            slave_conn_status_label.set_visibility(False)
                         ui.button(icon='settings', on_click=toggle_settings) \
                             .props('flat round color=white size=lg') \
                             .tooltip('開啟 / 關閉進階設定面板（部分項目需密碼登入）')
