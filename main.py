@@ -705,7 +705,7 @@ def on_plc_state(state: PLCConnectionState):
         prev_plc_state = state
         if state in (PLCConnectionState.DISCONNECTED, PLCConnectionState.ERROR):
             log_message(f"[警告] PLC 連線異常 ({state.value})")
-            show_alert(f'PLC 連線異常 ({state.value})', alarm_type="PLC異常")
+            show_alert(f'PLC 連線異常 ({state.value})', alarm_type="PLC")
         elif state == PLCConnectionState.CONNECTED and old is not None:
             log_message("[恢復] PLC 連線已恢復")
 
@@ -736,7 +736,7 @@ def _refresh_plc_alert_ui():
     try:
         with plc_alert_container.client:
             if plc_active_alarms:
-                plc_alert_label.set_text('PLC異常: ' + '、'.join(plc_active_alarms))
+                plc_alert_label.set_text('PLC: ' + '、'.join(plc_active_alarms))
                 plc_alert_container.set_visibility(True)
             else:
                 plc_alert_container.set_visibility(False)
@@ -752,9 +752,9 @@ def on_plc_alarm(newly1: int, newly2: int):
         for bit in range(16):
             if newly & (1 << bit):
                 desc = table.get(bit)
-                content = desc if desc else "未定義PLC異常"
-                write_alarm_log(content, alarm_type="PLC異常")   # CSV 只寫描述
-                log_message(f"[PLC異常] {reg}.{bit} {desc or '未定義'}")   # 系統 log 保留位置
+                content = desc if desc else "未定義異常"
+                write_alarm_log(content, alarm_type="PLC")   # CSV 只寫描述
+                log_message(f"[PLC] {reg}.{bit} {desc or '未定義'}")   # 系統 log 保留位置
                 if content not in plc_active_alarms:
                     plc_active_alarms.append(content)
                     added = True
