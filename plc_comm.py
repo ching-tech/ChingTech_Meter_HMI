@@ -11,7 +11,7 @@ from enum import Enum
 
 # --- D 暫存器常數 ---
 D_BASE = 500        # 起始暫存器
-D_READ_SIZE = 43    # 批次讀取數量 (D500~D542)
+D_READ_SIZE = 45    # 批次讀取數量 (D500~D544)
 
 def _to_signed16(v: int) -> int:
     """0~65535 無號 16-bit → -32768~32767 有號值。
@@ -34,6 +34,8 @@ _OFF_NG_START      = 29  # D529~D540: 槍 1~12 NG 數
 _OFF_NG_END        = 40
 _OFF_RESET         = 41  # D541: HMI 異常復歸
 _OFF_WARMUP        = 42  # D542: 暖槍訊號
+_OFF_PLC_ALARM1    = 43  # D543: PLC 異常 bit mask (bit0~15)
+_OFF_PLC_ALARM2    = 44  # D544: PLC 異常 bit mask (bit0~15)
 
 
 class PLCConnectionState(Enum):
@@ -56,6 +58,8 @@ class PLCData:
     ng_counts: List[int] = field(default_factory=lambda: [0] * 12)   # D529~D540
     reset: int = 0                                  # D541: HMI 異常復歸
     warmup: int = 0                                 # D542: 暖槍訊號
+    plc_alarm1: int = 0                             # D543: PLC 異常 bitmask
+    plc_alarm2: int = 0                             # D544: PLC 異常 bitmask
 
 
 class PLCManager:
@@ -90,6 +94,7 @@ class PLCManager:
         self._on_measure_trigger: Optional[Callable[[], None]] = None
         self._on_reset: Optional[Callable[[], None]] = None
         self._on_state_callback: Optional[Callable[[PLCConnectionState], None]] = None
+        self._on_plc_alarm: Optional[Callable[[int, int], None]] = None  # (D543新觸發bits, D544新觸發bits)
 
         # 模擬用
         self._sim_empty_trigger = False
@@ -102,12 +107,14 @@ class PLCManager:
                       on_empty: Optional[Callable[[], None]] = None,
                       on_measure: Optional[Callable[[], None]] = None,
                       on_state: Optional[Callable[[PLCConnectionState], None]] = None,
-                      on_reset: Optional[Callable[[], None]] = None):
+                      on_reset: Optional[Callable[[], None]] = None,
+                      on_plc_alarm: Optional[Callable[[int, int], None]] = None):
         """設定回呼函式"""
         self._on_empty_trigger = on_empty
         self._on_measure_trigger = on_measure
         self._on_state_callback = on_state
         self._on_reset = on_reset
+        self._on_plc_alarm = on_plc_alarm
 
     # --- 序列化底層 SLMP 讀寫 (避免多執行緒同時讀寫同一 socket 造成封包交錯) ---
     def _locked_write(self, address: str, values: list):
@@ -445,6 +452,12 @@ class PLCManager:
                     if self._on_reset:
                         self._on_reset()
 
+                # 偵測 D543/D544 PLC 異常「新觸發」的 bit (0→1 上升緣)，只報新出現的，避免每輪重複
+                newly1 = data.plc_alarm1 & ~self._prev_data.plc_alarm1 & 0xFFFF
+                newly2 = data.plc_alarm2 & ~self._prev_data.plc_alarm2 & 0xFFFF
+                if (newly1 or newly2) and self._on_plc_alarm:
+                    self._on_plc_alarm(newly1, newly2)
+
                 self._prev_data = data
                 self._plc_data = data
 
@@ -497,6 +510,8 @@ class PLCManager:
             data.ng_counts = raw[_OFF_NG_START:_OFF_NG_END + 1]
             data.reset = raw[_OFF_RESET]
             data.warmup = raw[_OFF_WARMUP]
+            data.plc_alarm1 = raw[_OFF_PLC_ALARM1] & 0xFFFF   # 讀回轉無號 bitmask
+            data.plc_alarm2 = raw[_OFF_PLC_ALARM2] & 0xFFFF
             return data
         except Exception as e:
             print(f"PLC 讀取失敗: {e}")

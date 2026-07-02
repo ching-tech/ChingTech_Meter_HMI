@@ -241,7 +241,8 @@ def init_managers():
             on_empty=on_plc_empty_trigger,
             on_measure=on_plc_measure_trigger,
             on_state=on_plc_state,
-            on_reset=on_plc_reset
+            on_reset=on_plc_reset,
+            on_plc_alarm=on_plc_alarm
         )
 
     # 網路管理器
@@ -710,6 +711,30 @@ def on_plc_state(state: PLCConnectionState):
             plc_manager.write_complete_signal()   # D500=0
             plc_manager.clear_empty_trigger()     # D515=0
             log_message("[PLC] 初始化完成：D500/D515 已歸零")
+
+# PLC 異常 bit 對照 (D543 / D544)；只記錄 CSV、不上 UI
+_PLC_ALARM_D543 = {
+    0: "緊急停止", 1: "左升降馬達異常", 2: "左推料馬達異常", 3: "右升降馬達異常",
+    4: "右推料馬達異常", 5: "推料伺服馬達異常", 6: "測試伺服馬達異常", 7: "左升降馬達上極限",
+    8: "左升降馬達下極限", 9: "右升降馬達上極限", 10: "右升降馬達下極限", 11: "推料伺服右極限",
+    12: "推料伺服左極限", 13: "測試伺服右極限", 14: "測試伺服左極限", 15: "分料異常",
+}
+_PLC_ALARM_D544 = {
+    0: "運轉中推車脫離", 1: "耳溫槍檢測異常,請查看電腦畫面", 2: "左右對齊汽缸突出異常",
+    3: "運轉中電腦斷線", 4: "推料異常", 5: "靜電異常自保",
+}
+
+def on_plc_alarm(newly1: int, newly2: int):
+    """PLC 異常 (D543/D544) 新觸發回呼：每個新亮的 bit 各寫一列 Alarm CSV (本機+遠端)，不上 UI。
+    只記「發生」(0→1)，由 plc_comm 上升緣偵測，故不會每輪重複。
+    CSV 內容只寫異常描述 (不含 D543.x 記憶體位置)；系統 log 保留位置供除錯。"""
+    for reg, newly, table in (("D543", newly1, _PLC_ALARM_D543), ("D544", newly2, _PLC_ALARM_D544)):
+        for bit in range(16):
+            if newly & (1 << bit):
+                desc = table.get(bit)
+                content = desc if desc else "未定義PLC異常"
+                write_alarm_log(content, alarm_type="PLC異常")   # CSV 只寫描述
+                log_message(f"[PLC異常] {reg}.{bit} {desc or '未定義'}")   # 系統 log 保留位置
 
 def on_plc_reset():
     global temp_anomaly_active, no_cover_anomaly_active, empty_out_of_range_count
