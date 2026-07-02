@@ -201,6 +201,9 @@ no_cover_anomaly_fields = None
 alert_container = None
 alert_message_label = None
 alert_flash_timer = None
+plc_alert_container = None   # PLC 異常橫幅 (與 PC 異常分開、不同色)
+plc_alert_label = None
+plc_active_alarms = []       # 目前顯示中的 PLC 異常描述 (累積，異常復歸才清)
 is_alert_visible = True  
 
 def init_managers():
@@ -720,14 +723,29 @@ _PLC_ALARM_D543 = {
     12: "推料伺服左極限", 13: "測試伺服右極限", 14: "測試伺服左極限", 15: "分料異常",
 }
 _PLC_ALARM_D544 = {
-    0: "運轉中推車脫離", 1: "耳溫槍檢測異常,請查看電腦畫面", 2: "左右對齊汽缸突出異常",
-    3: "運轉中電腦斷線", 4: "推料異常", 5: "靜電異常自保",
+    0: "運轉中推車脫離", 1: "PC異常訊息請查看PC", 2: "左右對齊汽缸突出異常",
+    3: "運轉中電腦斷線", 4: "推料異常", 5: "靜電異常",
 }
 
+def _refresh_plc_alert_ui():
+    """刷新 PLC 異常橫幅：有異常時顯示 (琥珀色)，無則隱藏。與 PC 紅色橫幅分開、不覆蓋。"""
+    if is_shutting_down or not plc_alert_container or not plc_alert_label:
+        return
+    try:
+        with plc_alert_container.client:
+            if plc_active_alarms:
+                plc_alert_label.set_text('PLC異常: ' + '、'.join(plc_active_alarms))
+                plc_alert_container.set_visibility(True)
+            else:
+                plc_alert_container.set_visibility(False)
+    except Exception:
+        pass
+
 def on_plc_alarm(newly1: int, newly2: int):
-    """PLC 異常 (D543/D544) 新觸發回呼：每個新亮的 bit 各寫一列 Alarm CSV (本機+遠端)，不上 UI。
-    只記「發生」(0→1)，由 plc_comm 上升緣偵測，故不會每輪重複。
-    CSV 內容只寫異常描述 (不含 D543.x 記憶體位置)；系統 log 保留位置供除錯。"""
+    """PLC 異常 (D543/D544) 新觸發回呼：每個新亮的 bit 各寫一列 Alarm CSV (本機+遠端) + 顯示在
+    專屬琥珀色橫幅 (與 PC 紅色異常分開)。只記「發生」(0→1)，由 plc_comm 上升緣偵測，不會每輪重複。
+    CSV 內容只寫異常描述 (不含 D543.x 記憶體位置)；系統 log 保留位置供除錯。橫幅由異常復歸清除。"""
+    added = False
     for reg, newly, table in (("D543", newly1, _PLC_ALARM_D543), ("D544", newly2, _PLC_ALARM_D544)):
         for bit in range(16):
             if newly & (1 << bit):
@@ -735,10 +753,19 @@ def on_plc_alarm(newly1: int, newly2: int):
                 content = desc if desc else "未定義PLC異常"
                 write_alarm_log(content, alarm_type="PLC異常")   # CSV 只寫描述
                 log_message(f"[PLC異常] {reg}.{bit} {desc or '未定義'}")   # 系統 log 保留位置
+                if content not in plc_active_alarms:
+                    plc_active_alarms.append(content)
+                    added = True
+    if added:
+        _refresh_plc_alert_ui()
 
 def on_plc_reset():
     global temp_anomaly_active, no_cover_anomaly_active, empty_out_of_range_count
     log_message("[PLC] HMI 異常復歸觸發")
+
+    # 清除 PLC 異常橫幅 (D541 異常復歸時清)
+    plc_active_alarms.clear()
+    _refresh_plc_alert_ui()
 
     # D513 整個清為 0 (通知 PLC 解除所有異常)
     if plc_manager:
@@ -2239,7 +2266,7 @@ def build_meter_block(title: str, start_ch: int, end_ch: int, border_color: str 
             meters_ui[i] = {'row_container': row_container, 'disabled_badge': disabled_badge, 'bt_icon': bt_icon, 'ear_cover': ear_cover_label, 'empty_display': empty_display, 'temp_display': temp_display, 'error_display': error_display, 'light': status_light, 'text': status_text, 'ok_display': ok_display, 'ng_display': ng_display, 'no_cover_count': no_cover_count_label}
 
 def build_ui():
-    global meters_ui, log_console, plc_status_icon, network_status_icon, alert_container, alert_message_label, system_status_label, measure_status_label, plc_monitor_ui, batch_no_input, total_ok_label, total_ng_label, temp_anomaly_status_label, no_cover_anomaly_status_label
+    global meters_ui, log_console, plc_status_icon, network_status_icon, alert_container, alert_message_label, system_status_label, measure_status_label, plc_monitor_ui, batch_no_input, total_ok_label, total_ng_label, temp_anomaly_status_label, no_cover_anomaly_status_label, plc_alert_container, plc_alert_label
     is_master = config.network.mode == "master"
     ui.colors(primary='#5898d4', secondary='#26a69a', accent='#9c27b0', dark='#1d1d1d')
     ui.add_head_html('<style>'
@@ -2368,6 +2395,12 @@ def build_ui():
                     alert_message_label = ui.label('').classes('text-2xl text-white font-bold')
                 ui.button('確認', on_click=stop_alert_flash).props('color=white text-color=red dense size=lg').classes('px-6') \
                     .tooltip('停止警報閃爍並隱藏紅色橫幅；不會解除實際異常（請按「異常復歸」）')
+        # PLC 異常橫幅 (琥珀色，與上方 PC 紅色異常分開顯示；異常復歸時清除)
+        with ui.card().classes('w-full bg-amber-500 p-3 border-2 border-amber-300') as plc_alert_c:
+            plc_alert_container = plc_alert_c; plc_alert_container.set_visibility(False)
+            with ui.row().classes('w-full items-center gap-3'):
+                ui.icon('report', size='lg', color='black')
+                plc_alert_label = ui.label('').classes('text-xl text-black font-bold')
         with ui.row().classes('w-full items-start gap-3'):
             if is_master: build_meter_block('Slave 通道 (CH12, 10, 8, 6, 4, 2)', 7, 12, 'orange')
             if is_master: build_meter_block('本機通道 (CH11, 9, 7, 5, 3, 1)', 1, 6, 'blue')

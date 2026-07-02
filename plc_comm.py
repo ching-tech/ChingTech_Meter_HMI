@@ -502,7 +502,7 @@ class PLCManager:
             data = PLCData()
             data.trigger = raw[_OFF_TRIGGER]
             data.results = raw[_OFF_RESULT_START:_OFF_RESULT_END + 1]
-            data.bt_error = raw[_OFF_BT_ERROR]
+            data.bt_error = raw[_OFF_BT_ERROR] & 0xFFFF   # 轉無號 (bit15 漏壓亮時避免讀成負數)
             data.heartbeat = raw[_OFF_HEARTBEAT]
             data.empty_trigger = raw[_OFF_EMPTY_TRIGGER]
             data.cycle_count = raw[_OFF_CYCLE_COUNT]
