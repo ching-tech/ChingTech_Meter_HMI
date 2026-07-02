@@ -665,6 +665,12 @@ class BluetoothManager:
                     # 回呼
                     if self._on_data_callback:
                         self._on_data_callback(device.channel, result)
+
+            # 安全上限：緩衝累積過大仍切不出完整封包 (裝置亂送/無結束碼) → 清空，避免記憶體無限成長
+            # (正常 DB 封包僅約 28~46 bytes，超過 4KB 必為異常資料)
+            if len(self._recv_buffers.get(channel, b'')) > 4096:
+                print(f"[!] {self._ch_name(channel)} 接收緩衝過大 ({len(self._recv_buffers[channel])} bytes) 無完整封包，已清空")
+                self._recv_buffers[channel] = b''
         except socket.timeout:
             pass
         except (ConnectionResetError, ConnectionAbortedError, OSError) as e:

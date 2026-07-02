@@ -16,19 +16,48 @@ import asyncio
 import time
 import queue
 
-# --- CMD 輸出同時寫入 log 檔 ---
+# --- CMD 輸出同時寫入 log 檔 (含單檔大小輪替) ---
+class _RotatingLog:
+    """共享的 debug log 檔：累積寫入超過 max_bytes 就自動換新檔 (檔名帶時間戳+機台)。
+    stdout / stderr 共用同一個 _RotatingLog，才能協調換檔 (否則各換各的會寫到已關檔案)。"""
+    def __init__(self, log_dir, machine, max_bytes):
+        self.log_dir = log_dir
+        self.machine = machine
+        self.max_bytes = max_bytes
+        self.file = None
+        self.written = 0
+        self._lock = threading.Lock()
+        self._open_new()
+    def _open_new(self):
+        base = f'debug_{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}_{self.machine}'
+        path = os.path.join(self.log_dir, base + '.txt')
+        _i = 1
+        while os.path.exists(path):   # 同秒換檔撞名時加序號，避免覆蓋
+            path = os.path.join(self.log_dir, f'{base}_{_i}.txt')
+            _i += 1
+        self.file = open(path, 'w', encoding='utf-8')
+        self.written = 0
+    def write(self, text):
+        with self._lock:
+            try:
+                self.file.write(text)
+                self.file.flush()
+                self.written += len(text.encode('utf-8', 'replace'))
+                if self.max_bytes and self.written >= self.max_bytes:
+                    try: self.file.close()
+                    except Exception: pass
+                    self._open_new()
+            except Exception:
+                pass
+
 class _TeeWriter:
-    """同時輸出到 console 和 log 檔案"""
-    def __init__(self, original, log_file):
+    """同時輸出到 console 和共享 log 檔 (_RotatingLog)"""
+    def __init__(self, original, rlog):
         self.original = original
-        self.log_file = log_file
+        self.rlog = rlog
     def write(self, text):
         self.original.write(text)
-        try:
-            self.log_file.write(text)
-            self.log_file.flush()
-        except Exception:
-            pass
+        self.rlog.write(text)
     def flush(self):
         self.original.flush()
     def isatty(self):
@@ -66,11 +95,26 @@ if multiprocessing.current_process().name == 'MainProcess':
         _debug_log_dir = 'logs'
         os.makedirs(_debug_log_dir, exist_ok=True)
         print(f'[!] 無法建立 D:\\debug_log ({_e})，debug log fallback 到 {_debug_log_dir}/')
+    # 清理超過保留天數的舊 debug log，避免長期累積塞滿硬碟 (每次啟動時檢查)
+    _DEBUG_LOG_KEEP_DAYS = 365
+    try:
+        _cutoff = time.time() - _DEBUG_LOG_KEEP_DAYS * 86400
+        for _f in os.listdir(_debug_log_dir):
+            if _f.startswith('debug_') and _f.endswith('.txt'):
+                _fp = os.path.join(_debug_log_dir, _f)
+                try:
+                    if os.path.getmtime(_fp) < _cutoff:
+                        os.remove(_fp)
+                except OSError:
+                    pass
+    except Exception as _e:
+        print(f'[!] 清理舊 debug log 失敗: {_e}')
     _machine = _read_machine_name_early()
-    _log_filename = os.path.join(_debug_log_dir, f'debug_{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}_{_machine}.txt')
-    _log_file = open(_log_filename, 'w', encoding='utf-8')
-    sys.stdout = _TeeWriter(sys.stdout, _log_file)
-    sys.stderr = _TeeWriter(sys.stderr, _log_file)
+    # 單檔輪替：24/7 不重開時，避免單一 debug 檔長到 GB 級開不了 (總量仍由上面 KEEP_DAYS 控制)
+    _DEBUG_LOG_MAX_BYTES = 50 * 1024 * 1024   # 50 MB / 檔
+    _rlog = _RotatingLog(_debug_log_dir, _machine, _DEBUG_LOG_MAX_BYTES)
+    sys.stdout = _TeeWriter(sys.stdout, _rlog)
+    sys.stderr = _TeeWriter(sys.stderr, _rlog)
 
 from nicegui import ui, app
 
@@ -400,7 +444,7 @@ def _write_alarm_line(alarm_dir: str, today: str, line: str, machine_suffix: str
 # 本機寫入維持同步 (磁碟 ~1ms 不會卡)；遠端 SMB 改 daemon thread 避免阻塞 UI/量測流程。
 # 失敗時用指數退避重試 (1, 2, 4, 8, 16, 32, 60, 60...)，永不放棄；若遠端持續離線，
 # 佇列會累積 (alarm 量低，實務上不會爆)。
-_alarm_remote_queue: "queue.Queue" = queue.Queue()
+_alarm_remote_queue: "queue.Queue" = queue.Queue(maxsize=10000)  # 有上限，滿了丟棄 (本機 alarm 仍是完整來源)
 
 def _alarm_remote_worker():
     """背景 thread：消費 alarm 佇列，把 alarm 寫到遠端資料夾。"""
@@ -418,7 +462,10 @@ def _alarm_remote_worker():
                 backoff = min(60, 2 ** attempt)
                 print(f"[!] 遠端 alarm 寫入失敗 (第 {attempt + 1} 次嘗試，{backoff}s 後重試): {e}")
                 time.sleep(backoff)
-                _alarm_remote_queue.put((path, today, line, machine_suffix, attempt + 1))
+                try:
+                    _alarm_remote_queue.put_nowait((path, today, line, machine_suffix, attempt + 1))
+                except queue.Full:
+                    print("[!!] 遠端 alarm 佇列已滿，本筆重試放棄 (本機 alarm 不受影響)")
         except Exception as e:
             print(f"[!!] alarm worker 未預期錯誤: {e}")
 
@@ -519,15 +566,18 @@ def write_alarm_log(message: str, alarm_type: str = "其他"):
         try: log_message(err)
         except: pass
 
-    # 遠端寫入：丟進佇列由 daemon worker 處理，呼叫端不阻塞
+    # 遠端寫入：丟進佇列由 daemon worker 處理，呼叫端不阻塞；佇列滿則丟棄 (本機 alarm 已寫，不影響完整性)
     if config.remote_alarm_dir:
-        _alarm_remote_queue.put((
-            config.remote_alarm_dir,
-            today,
-            line,
-            machine_suffix,
-            0,  # attempt 計數
-        ))
+        try:
+            _alarm_remote_queue.put_nowait((
+                config.remote_alarm_dir,
+                today,
+                line,
+                machine_suffix,
+                0,  # attempt 計數
+            ))
+        except queue.Full:
+            print("[!!] 遠端 alarm 佇列已滿 (10000 筆)，本筆已丟棄；本機 alarm 不受影響")
 
 def show_alert(message: str, alarm_type: str = "其他"):
     """顯示通用警報"""
@@ -2350,7 +2400,7 @@ def build_ui():
                                 plc_monitor_ui[f'result_{i}'] = ui.label('0').classes('text-white text-sm font-mono')
             with ui.card().classes('bg-slate-800 p-3 flex-grow').style('min-width: 600px'):
                 ui.label('系統 Log').classes('text-lg text-blue-300 font-bold mb-2')
-                log_console = ui.log(max_lines=100).classes('w-full text-base text-gray-300 font-mono flip-log').style('height: 100%; min-height: 300px')
+                log_console = ui.log(max_lines=300).classes('w-full text-base text-gray-300 font-mono flip-log').style('height: 100%; min-height: 300px')
 
 @ui.page('/')
 def main_page():
