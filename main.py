@@ -18,7 +18,8 @@ import queue
 
 # --- CMD 輸出同時寫入 log 檔 (含單檔大小輪替) ---
 class _RotatingLog:
-    """共享的 debug log 檔：累積寫入超過 max_bytes 就自動換新檔 (檔名帶時間戳+機台)。
+    """共享的 debug log 檔：累積寫入超過 max_bytes、或跨日 (日期變更) 就自動換新檔
+    (檔名帶時間戳+機台)。程式 24/7 不重開時，跨日後的 log 會寫到當天日期的新檔。
     stdout / stderr 共用同一個 _RotatingLog，才能協調換檔 (否則各換各的會寫到已關檔案)。"""
     def __init__(self, log_dir, machine, max_bytes):
         self.log_dir = log_dir
@@ -26,10 +27,13 @@ class _RotatingLog:
         self.max_bytes = max_bytes
         self.file = None
         self.written = 0
+        self.date_str = ''   # 目前檔案所屬日期 (YYYYMMDD)，用於跨日換檔
         self._lock = threading.Lock()
         self._open_new()
     def _open_new(self):
-        base = f'debug_{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}_{self.machine}'
+        now = datetime.datetime.now()
+        self.date_str = now.strftime('%Y%m%d')
+        base = f'debug_{now.strftime("%Y%m%d_%H%M%S")}_{self.machine}'
         path = os.path.join(self.log_dir, base + '.txt')
         _i = 1
         while os.path.exists(path):   # 同秒換檔撞名時加序號，避免覆蓋
@@ -40,6 +44,11 @@ class _RotatingLog:
     def write(self, text):
         with self._lock:
             try:
+                # 跨日：先換到當天日期的新檔再寫，確保 log 內容寫在正確日期的檔案
+                if datetime.datetime.now().strftime('%Y%m%d') != self.date_str:
+                    try: self.file.close()
+                    except Exception: pass
+                    self._open_new()
                 self.file.write(text)
                 self.file.flush()
                 self.written += len(text.encode('utf-8', 'replace'))
@@ -157,7 +166,8 @@ network_status_icon = None
 slave_conn_status_label = None   # 「Slave 連線異常」紅字 (Master 專屬)
 _slave_conn_alert_shown = False  # 邊緣偵測：是否已記錄過本次 Slave 連線異常
 system_status_label = None  
-measure_status_label = None 
+measure_status_label = None
+plc_runtime_label = None    # 頂部「PLC運轉時數」(D545/D546 DINT)
 batch_no_input = None       # 批號輸入框
 machine_name_input = None   # 設定頁的機台名稱輸入框
 total_ok_label = None       # 頂部 TOTAL OK 大字
@@ -169,7 +179,6 @@ plc_sim_switch = None       # 設定頁的 PLC 模擬模式開關
 bt_sim_switch = None        # 設定頁的藍芽模擬模式開關
 remote_log_dir_input = None    # 遠端 log 路徑輸入框
 remote_alarm_dir_input = None  # 遠端 alarm 路徑輸入框
-_startup_reset_checked = False  # 啟動時跨日歸零檢查只執行一次
 plc_monitor_ui = {}
 system_running = False
 slave_channel_enabled = {}  # Slave 回報的通道啟用狀態 {ch: bool}
@@ -1292,25 +1301,26 @@ def on_force_clear_triggers():
             ui.button('確認解卡', icon='build_circle', on_click=do_clear).props('color=red')
     dialog.open()
 
-def _maybe_daily_reset_on_startup():
-    """啟動連上 PLC 後執行一次跨日檢查：
-       - last_reset_date 與今日相同 → 沿用既有計數 (避免同日重啟把累積數歸零)
-       - 不同 → 自動歸零並更新日期
-       PLC 寫入失敗時 flag 保持 False，下次 poll 看到 CONNECTED 會重試。
+def _maybe_daily_reset():
+    """跨日自動歸零檢查 (PLC 連線中時每次 poll 都檢查)：
+       - last_reset_date 與今日相同 → 不動作 (同日重啟不會把累積數歸零)
+       - 不同 → 自動歸零並把 last_reset_date 更新成今日
+       因此涵蓋兩種情境：
+       (a) 啟動時：上次歸零不是今天 → 開機即歸零
+       (b) 程式不關機連續運轉：過了午夜日期一變 → 自動歸零，不需重開程式
+       量測進行中不歸零 (避免歸零卡在循環中間)，等回到待機再做；PLC 寫入失敗也會下次重試。
     """
-    global _startup_reset_checked
-    if _startup_reset_checked:
-        return
     today = datetime.datetime.now().strftime("%Y-%m-%d")
     last = (config.last_reset_date or "").strip()
     if last == today:
-        log_message(f"[啟動] 與上次歸零同日 ({today})，沿用 PLC 既有計數")
-        _startup_reset_checked = True
         return
-    log_message(f"[啟動] 跨日自動歸零 (上次: {last or '無紀錄'} → 今日: {today})")
-    if _do_reset_counts(reason="啟動跨日自動歸零"):
-        _startup_reset_checked = True
-    # 若失敗，flag 保持 False，下次 update_plc_display 看到 CONNECTED 時會重試
+    # 正在擷取/判定中先跳過，下次 poll 再檢查 (COMPLETE/EMPTY_DONE 屬於循環間空檔，可歸零)
+    if measure_manager and measure_manager.state in (
+            MeasurementState.WAITING_EMPTY, MeasurementState.WAITING_MEASURE, MeasurementState.MEASURING):
+        return
+    log_message(f"[計數] 跨日自動歸零 (上次: {last or '無紀錄'} → 今日: {today})")
+    _do_reset_counts(reason="跨日自動歸零")
+    # 寫入失敗時 last_reset_date 不更新，下次 poll 看到 CONNECTED 會自動重試
 
 def _do_reset_counts(reason: str) -> bool:
     """共用歸零邏輯：寫 PLC 0 + 清 UI；只在 PLC 寫入成功時才更新 last_reset_date 並存檔。
@@ -1919,9 +1929,9 @@ def update_plc_display():
         if s == PLCConnectionState.CONNECTED: plc_status_icon.props('color=green')
         elif s == PLCConnectionState.CONNECTING: plc_status_icon.props('color=yellow')
         else: plc_status_icon.props('color=red')
-        # PLC 第一次連線成功時，做跨日歸零檢查 (整個程式生命週期只跑一次)
+        # PLC 連線中時持續做跨日歸零檢查 (啟動時 + 不關機跨過午夜都會觸發)
         if s == PLCConnectionState.CONNECTED:
-            _maybe_daily_reset_on_startup()
+            _maybe_daily_reset()
     for ch in bt_mgr.devices.keys(): update_meter_bt_status(ch, bt_mgr.get_device_state(ch))
 
     # 檢查 D500/D515 觸發超時（15 秒未歸 0 = 流程卡住）
@@ -1950,6 +1960,12 @@ def update_plc_display():
 
     data = plc_mgr.plc_data
     if not data: return
+    # PLC 運轉時數 (D545/D546 DINT)；PLC 未連線時顯示 --
+    if plc_runtime_label is not None:
+        if plc_mgr.state == PLCConnectionState.CONNECTED:
+            plc_runtime_label.set_text(f'{data.runtime_hours} h')
+        else:
+            plc_runtime_label.set_text('--')
     if plc_monitor_ui:
         plc_monitor_ui['trigger_val'].set_text(str(data.trigger))
         plc_monitor_ui['trigger_ind'].classes('text-green-500' if data.trigger else 'text-gray-500', remove='text-green-500 text-gray-500')
@@ -2032,6 +2048,11 @@ def build_settings_drawer():
         update_protected_visibility()
         login_status.set_text('未登入')
         login_status.classes('text-gray-400', remove='text-green-400 text-red-400')
+        # 清空密碼框，下次開啟要重新輸入
+        try:
+            pwd_input.set_value('')
+        except Exception:
+            pass
 
     def on_judge_mode_change(e):
         mode = e.value
@@ -2263,6 +2284,13 @@ def build_settings_drawer():
                 ui.button('更新資料 (即時套用)', on_click=on_apply_settings).props('color=green icon=sync').classes('w-full mt-2') \
                     .tooltip('儲存設定並即時套用到執行中的管理器（不需重啟程式）')
 
+    # 關閉設定面板時自動登出 (不論用關閉鈕、齒輪鈕或點面板外關閉)，避免忘記登出讓他人誤改
+    def _on_drawer_toggle(e):
+        if not e.value and settings_logged_in:
+            on_logout_click(login_status)
+            log_message("[設定] 設定面板已關閉，自動登出")
+    drawer.on_value_change(_on_drawer_toggle)
+
 def build_meter_block(title: str, start_ch: int, end_ch: int, border_color: str = 'blue'):
     is_master = config.network.mode == "master"
     with ui.card().classes(f'bg-slate-800 p-3 border-l-4 border-{border_color}-500').style('min-width: 600px'):
@@ -2299,7 +2327,7 @@ def build_meter_block(title: str, start_ch: int, end_ch: int, border_color: str 
             meters_ui[i] = {'row_container': row_container, 'disabled_badge': disabled_badge, 'bt_icon': bt_icon, 'ear_cover': ear_cover_label, 'empty_display': empty_display, 'temp_display': temp_display, 'error_display': error_display, 'light': status_light, 'text': status_text, 'ok_display': ok_display, 'ng_display': ng_display, 'no_cover_count': no_cover_count_label}
 
 def build_ui():
-    global meters_ui, log_console, plc_status_icon, network_status_icon, alert_container, alert_message_label, system_status_label, measure_status_label, plc_monitor_ui, batch_no_input, total_ok_label, total_ng_label, temp_anomaly_status_label, no_cover_anomaly_status_label, plc_alert_container, plc_alert_label, slave_conn_status_label
+    global meters_ui, log_console, plc_status_icon, network_status_icon, alert_container, alert_message_label, system_status_label, measure_status_label, plc_monitor_ui, batch_no_input, total_ok_label, total_ng_label, temp_anomaly_status_label, no_cover_anomaly_status_label, plc_alert_container, plc_alert_label, slave_conn_status_label, plc_runtime_label
     is_master = config.network.mode == "master"
     ui.colors(primary='#5898d4', secondary='#26a69a', accent='#9c27b0', dark='#1d1d1d')
     ui.add_head_html('<style>'
@@ -2346,6 +2374,11 @@ def build_ui():
                                 }
                                 _initial_state_text = _state_map.get(measure_manager.state, "待機中")
                             measure_status_label = ui.label(_initial_state_text).classes('text-gray-400 text-2xl font-bold')
+                        # PLC 運轉時數 (D545/D546 DINT)
+                        with ui.row().classes('items-center gap-2 bg-slate-800 px-4 py-1 rounded-full border border-gray-700'):
+                            ui.label('PLC運轉時數:').classes('text-gray-300 text-lg')
+                            plc_runtime_label = ui.label('--').classes('text-white text-2xl font-bold font-mono') \
+                                .tooltip('讀取 PLC D545/D546 (32-bit DINT) 的累計運轉時數')
                     with ui.row().classes('items-center gap-4'):
                         if is_master:
                             with ui.row().classes('items-center gap-2'):

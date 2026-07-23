@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 PLC MC Protocol 通訊模組 - 與三菱 FX5U PLC 通訊 (3E 協議)
-暫存器範圍: D500~D541 (42 個 D 字組)
+暫存器範圍: D500~D546 (42 個 D 字組)
 """
 import threading
 import time
@@ -11,7 +11,7 @@ from enum import Enum
 
 # --- D 暫存器常數 ---
 D_BASE = 500        # 起始暫存器
-D_READ_SIZE = 45    # 批次讀取數量 (D500~D544)
+D_READ_SIZE = 47    # 批次讀取數量 (D500~D546)
 
 def _to_signed16(v: int) -> int:
     """0~65535 無號 16-bit → -32768~32767 有號值。
@@ -19,6 +19,12 @@ def _to_signed16(v: int) -> int:
     會 OverflowError 導致整筆寫入失敗 (例如 D513 bit15 漏壓旗標)。先轉有號即可正確寫入。"""
     v &= 0xFFFF
     return v - 0x10000 if v >= 0x8000 else v
+
+def _dint_from_words(low: int, high: int) -> int:
+    """兩個 16-bit 字組 (低位在前) 合併成 32-bit 有號 DINT。
+    pymcprotocol 讀回是 signed16，須先 & 0xFFFF 轉無號再合併，否則負值會算錯。"""
+    v = ((high & 0xFFFF) << 16) | (low & 0xFFFF)
+    return v - 0x100000000 if v >= 0x80000000 else v
 
 # 各暫存器偏移 (相對於 D_BASE)
 _OFF_TRIGGER       = 0   # D500: 量測觸發
@@ -36,6 +42,8 @@ _OFF_RESET         = 41  # D541: HMI 異常復歸
 _OFF_WARMUP        = 42  # D542: 暖槍訊號
 _OFF_PLC_ALARM1    = 43  # D543: PLC 異常 bit mask (bit0~15)
 _OFF_PLC_ALARM2    = 44  # D544: PLC 異常 bit mask (bit0~15)
+_OFF_RUNTIME_LOW   = 45  # D545: PLC 運轉時數 DINT 低位字
+_OFF_RUNTIME_HIGH  = 46  # D546: PLC 運轉時數 DINT 高位字
 
 
 class PLCConnectionState(Enum):
@@ -47,7 +55,7 @@ class PLCConnectionState(Enum):
 
 @dataclass
 class PLCData:
-    """D500~D541 暫存器快照"""
+    """D500~D546 暫存器快照"""
     trigger: int = 0                                # D500: 量測觸發
     results: List[int] = field(default_factory=lambda: [2] * 12)  # D501~D512 (0=OK, 1=NG, 2=不使用)
     bt_error: int = 0                               # D513: 藍芽連線狀態 bit mask
@@ -60,10 +68,11 @@ class PLCData:
     warmup: int = 0                                 # D542: 暖槍訊號
     plc_alarm1: int = 0                             # D543: PLC 異常 bitmask
     plc_alarm2: int = 0                             # D544: PLC 異常 bitmask
+    runtime_hours: int = 0                          # D545(低)+D546(高): PLC 運轉時數 (DINT)
 
 
 class PLCManager:
-    """PLC 通訊管理器 (FX5U 3E 協議, D500~D541)"""
+    """PLC 通訊管理器 (FX5U 3E 協議, D500~D546)"""
 
     def __init__(self, ip_address: str, port: int, simulation_mode: bool = True):
         self.ip_address = ip_address
@@ -420,7 +429,7 @@ class PLCManager:
     # --- 監控迴圈 ---
 
     def _monitor_loop(self):
-        """監控迴圈: 每 50ms 批次讀取 D500~D541, 偵測上升緣, 每秒切換心跳"""
+        """監控迴圈: 每 50ms 批次讀取 D500~D546, 偵測上升緣, 每秒切換心跳"""
         error_count = 0
         reconnect_count = 0
         while self._running:
@@ -491,7 +500,7 @@ class PLCManager:
             time.sleep(0.1)  # 100ms 掃描週期 (原為 50ms 以減輕模擬器負擔)
 
     def _batch_read(self) -> Optional[PLCData]:
-        """批次讀取 D500~D541 (42 個字組)"""
+        """批次讀取 D500~D546 (47 個字組)"""
         if self.simulation_mode:
             return self._sim_read()
 
@@ -512,6 +521,8 @@ class PLCManager:
             data.warmup = raw[_OFF_WARMUP]
             data.plc_alarm1 = raw[_OFF_PLC_ALARM1] & 0xFFFF   # 讀回轉無號 bitmask
             data.plc_alarm2 = raw[_OFF_PLC_ALARM2] & 0xFFFF
+            # D545/D546 組成 32-bit DINT (低位在前)；讀回是 signed16，先轉無號再合併
+            data.runtime_hours = _dint_from_words(raw[_OFF_RUNTIME_LOW], raw[_OFF_RUNTIME_HIGH])
             return data
         except Exception as e:
             print(f"PLC 讀取失敗: {e}")
