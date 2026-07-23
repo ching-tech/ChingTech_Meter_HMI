@@ -801,16 +801,37 @@ def on_plc_reset():
     # 清除所有異常狀態
     temp_anomaly_active = False
     no_cover_anomaly_active = False
-    empty_out_of_range_count = 0
-    no_cover_consecutive.clear()
 
-    # 清除 UI 上無套計數顯示
+    # 連續無套計數：只清「已達門檻 (正在報警)」的通道，未達門檻的保留累計。
+    # D541 是共用復歸信號，PLC 自己的異常 (靜電/安全門…) 按復歸時不該把還在累積中的
+    # 無套計數洗掉，否則本來 2/3 的通道要重數，造成漏判。
+    threshold = config.measurement.no_cover_anomaly_count
+    cleared = [ch for ch, cnt in no_cover_consecutive.items() if cnt >= threshold]
+    for ch in cleared:
+        no_cover_consecutive[ch] = 0
+    if cleared:
+        log_message("[復歸] 連續無套計數歸零 (已達門檻): "
+                    + ", ".join(sorted(get_channel_display_name(c) for c in cleared)))
+    kept = {ch: cnt for ch, cnt in no_cover_consecutive.items() if cnt > 0}
+    if kept:
+        log_message(f"[復歸] 保留未達門檻的連續無套計數: "
+                    + ", ".join(f"{get_channel_display_name(c)}={n}" for c, n in sorted(kept.items())))
+
+    # 暖槍空槍超限累計：同原則，只有已達門檻 (已報警) 才歸零
+    if empty_out_of_range_count >= config.measurement.warmup_empty_threshold:
+        empty_out_of_range_count = 0
+
+    # 同步 UI 上無套計數顯示 (只有被清掉的會變 0，其餘維持原值)
     for ch, meter in meters_ui.items():
         if meter.get('no_cover_count'):
+            cnt = no_cover_consecutive.get(ch, 0)
             try:
                 with meter['no_cover_count'].client:
-                    meter['no_cover_count'].set_text('0')
-                    meter['no_cover_count'].classes('text-gray-400', remove='text-orange-400')
+                    meter['no_cover_count'].set_text(str(cnt))
+                    if cnt > 0:
+                        meter['no_cover_count'].classes('text-orange-400', remove='text-gray-400')
+                    else:
+                        meter['no_cover_count'].classes('text-gray-400', remove='text-orange-400')
             except:
                 pass
 
