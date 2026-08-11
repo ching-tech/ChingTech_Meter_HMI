@@ -1,0 +1,32 @@
+# 擎添耳溫槍探頭套檢測系統 — 操作說明書
+
+> 擎添工業（ChingTech）為耳溫槍探頭套自動化檢測產線開發的人機介面（HMI）。
+> 用於自動檢測探頭套的溫度量測精度，支援 12 通道同時量測，採 Master-Slave
+> 雙機協作架構。本站為系統操作說明書與部署指南。
+
+## 關於
+- 開發單位：擎添工業（ChingTech），1984 年成立，深耕機電自動化逾 40 年
+- 類型：客製化檢測系統的操作手冊（GitHub Pages 文件站）
+- 平台：Windows，Python 3.8+
+
+## 系統架構
+- PLC：三菱 5U，透過 MC Protocol 發送觸發訊號、接收檢測結果
+- Master（電腦 A）：負責通道 1 至 6
+- Slave（電腦 B）：負責通道 7 至 12，與 Master 以 TCP/IP Port 5001 連線
+- 量測端：耳溫槍以 Bluetooth SPP 連線，Master 與 Slave 各接 6 支
+
+## 手冊涵蓋
+- HMI 介面操作與各按鈕功能
+- PLC 通訊（MC Protocol）設定與疑難排解
+- 藍牙耳溫槍配對、連線與移除
+- 檢測流程與判定邏輯
+- CSV 檢測紀錄輸出
+- 進階設定（config.json）與模擬模式（simulation_mode）
+- 部署注意事項
+
+## 連結
+- 操作說明書：https://ching-tech.github.io/ChingTech_Meter_HMI/
+- 部署指南：https://ching-tech.github.io/ChingTech_Meter_HMI/deployment-guide.html
+- 藍牙流程：https://ching-tech.github.io/ChingTech_Meter_HMI/bluetooth_flow.html
+- 案例展示資料庫：https://ching-tech.github.io/chingtech-case-hub/
+- 官網：https://ching-tech.com
