@@ -45,3 +45,7 @@ config.json
 .agents/
 internal/
 nul
+
+# Docs: Word 手冊與 manual 不進 git (docs/ 是 GitHub Pages，commit 就會公開)
+docs/*.docx
+docs/manual/
